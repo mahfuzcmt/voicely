@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter doctor:*)",
+      "Bash(cmd.exe /c \"flutter doctor\")",
+      "Bash(cmd.exe /c \"where /R C:\\\\ flutter.bat 2>nul | findstr /i flutter\")",
+      "Bash(cmd.exe /c \"dir C:\\\\flutter\\\\bin\\\\flutter.bat 2>nul || dir C:\\\\src\\\\flutter\\\\bin\\\\flutter.bat 2>nul || dir C:\\\\Users\\\\*\\\\flutter\\\\bin\\\\flutter.bat 2>nul || dir D:\\\\flutter\\\\bin\\\\flutter.bat 2>nul || dir C:\\\\development\\\\flutter\\\\bin\\\\flutter.bat 2>nul\")",
+      "Bash(cmd.exe /c \"echo %LOCALAPPDATA% && echo %USERPROFILE%\")",
+      "Bash(cmd.exe /c \"if exist \"\"C:\\\\Users\\\\Local Admin\\\\flutter\\\\bin\\\\flutter.bat\"\" echo FOUND_USER_FLUTTER & if exist \"\"C:\\\\flutter\\\\bin\\\\flutter.bat\"\" echo FOUND_C_FLUTTER & if exist \"\"D:\\\\flutter\\\\bin\\\\flutter.bat\"\" echo FOUND_D_FLUTTER & if exist \"\"C:\\\\src\\\\flutter\\\\bin\\\\flutter.bat\"\" echo FOUND_SRC_FLUTTER\")",
+      "Bash(cmd.exe /c \"echo %PATH%\")",
+      "Bash(cmd.exe /c \"if not exist \"\"C:\\\\flutter\"\" mkdir \"\"C:\\\\flutter\"\"\")",
+      "Bash(cmd.exe /c \"powershell -Command \"\"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri ''https://storage.googleapis.com/flutter_infra_release/releases/stable/windows/flutter_windows_3.24.5-stable.zip'' -OutFile ''C:\\\\flutter\\\\flutter.zip'' -UseBasicParsing\"\"\")",
+      "Bash(cmd.exe /c \"dir C:\\\\flutter\\\\flutter.zip 2>nul\")",
+      "Bash(dir:*)",
+      "Bash(\"C:\\\\Users\\\\Local Admin\\\\Downloads\\\\flutter_windows_3.38.8-stable\\\\flutter\\\\bin\\\\flutter.bat\" doctor)",
+      "Bash(\"C:\\\\Users\\\\Local Admin\\\\Downloads\\\\flutter_windows_3.38.8-stable\\\\flutter\\\\bin\\\\flutter.bat\" create --org com.voicely --project-name voicely --platforms android,ios .)",
+      "Bash(\"C:\\\\Users\\\\Local Admin\\\\Downloads\\\\flutter_windows_3.38.8-stable\\\\flutter\\\\bin\\\\flutter.bat\" pub get)",
+      "Bash(timeout:*)",
+      "Bash(\"C:\\\\Users\\\\Local Admin\\\\Downloads\\\\flutter_windows_3.38.8-stable\\\\flutter\\\\bin\\\\flutter.bat\" pub run build_runner build --delete-conflicting-outputs)",
+      "Bash(\"C:\\\\Users\\\\Local Admin\\\\Downloads\\\\flutter_windows_3.38.8-stable\\\\flutter\\\\bin\\\\flutter.bat\" analyze)",
+      "Bash(\"C:\\\\Users\\\\Local Admin\\\\Downloads\\\\flutter_windows_3.38.8-stable\\\\flutter\\\\bin\\\\flutter.bat\" pub run build_runner clean)"
+    ]
+  }
+}
