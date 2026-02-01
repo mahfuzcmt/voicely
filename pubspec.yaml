@@ -23,8 +23,8 @@ dependencies:
   firebase_messaging: ^15.2.4
 
   # WebRTC & Audio
-  flutter_webrtc: ^0.12.8+hotfix.1
-  record: ^5.2.1
+  flutter_webrtc: ^1.3.0
+  record: ^6.0.0
   just_audio: ^0.9.46
   audio_session: ^0.1.25
 
