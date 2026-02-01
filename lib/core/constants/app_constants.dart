@@ -24,6 +24,23 @@ class AppConstants {
   static const Duration pttMaxDuration = Duration(minutes: 2);
   static const Duration floorRequestTimeout = Duration(seconds: 5);
 
+  // WebRTC ICE servers configuration
+  static const List<Map<String, dynamic>> iceServers = [
+    {
+      'urls': [
+        'stun:stun.l.google.com:19302',
+        'stun:stun1.l.google.com:19302',
+        'stun:stun2.l.google.com:19302',
+      ],
+    },
+    // Add TURN servers for production use:
+    // {
+    //   'urls': 'turn:your-turn-server.com:3478',
+    //   'username': 'your-username',
+    //   'credential': 'your-credential',
+    // },
+  ];
+
   // Location settings
   static const Duration locationUpdateInterval = Duration(seconds: 30);
   static const double locationDistanceFilter = 10.0; // meters

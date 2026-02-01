@@ -1,29 +1,27 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../core/theme/app_colors.dart';
+import '../../../../core/utils/extensions.dart';
+import '../../domain/models/ptt_session_model.dart';
+import '../providers/audio_providers.dart';
+import '../providers/ptt_providers.dart';
 
-enum PttState { idle, requesting, transmitting, receiving }
-
-class PttButton extends StatefulWidget {
+class PttButton extends ConsumerStatefulWidget {
   final String channelId;
-  final VoidCallback? onPttStart;
-  final VoidCallback? onPttEnd;
 
   const PttButton({
     super.key,
     required this.channelId,
-    this.onPttStart,
-    this.onPttEnd,
   });
 
   @override
-  State<PttButton> createState() => _PttButtonState();
+  ConsumerState<PttButton> createState() => _PttButtonState();
 }
 
-class _PttButtonState extends State<PttButton>
+class _PttButtonState extends ConsumerState<PttButton>
     with SingleTickerProviderStateMixin {
-  PttState _state = PttState.idle;
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
 
@@ -45,32 +43,89 @@ class _PttButtonState extends State<PttButton>
     super.dispose();
   }
 
-  void _startPtt() {
-    HapticFeedback.heavyImpact();
-    setState(() => _state = PttState.transmitting);
-    _pulseController.repeat(reverse: true);
-    widget.onPttStart?.call();
+  PttSessionState _getState(PttSessionModel session) {
+    return session.state;
   }
 
-  void _endPtt() {
+  void _startPtt() async {
+    HapticFeedback.heavyImpact();
+    _pulseController.repeat(reverse: true);
+
+    // Configure audio and start PTT
+    await ref.read(pttAudioStateProvider.notifier).startTransmitting();
+    final success =
+        await ref.read(pttSessionProvider(widget.channelId).notifier).startPtt();
+
+    if (!success && mounted) {
+      _pulseController.stop();
+      _pulseController.reset();
+      await ref.read(pttAudioStateProvider.notifier).stop();
+
+      final session = ref.read(pttSessionProvider(widget.channelId));
+      if (session.errorMessage != null) {
+        context.showSnackBar(session.errorMessage!);
+        ref
+            .read(pttSessionProvider(widget.channelId).notifier)
+            .clearError();
+      }
+    }
+  }
+
+  void _endPtt() async {
     HapticFeedback.lightImpact();
-    setState(() => _state = PttState.idle);
     _pulseController.stop();
     _pulseController.reset();
-    widget.onPttEnd?.call();
+
+    await ref.read(pttSessionProvider(widget.channelId).notifier).stopPtt();
+    await ref.read(pttAudioStateProvider.notifier).stop();
   }
 
   @override
   Widget build(BuildContext context) {
+    final session = ref.watch(pttSessionProvider(widget.channelId));
+    final state = _getState(session);
+
+    // Update pulse animation based on state
+    if (state == PttSessionState.transmitting && !_pulseController.isAnimating) {
+      _pulseController.repeat(reverse: true);
+    } else if (state != PttSessionState.transmitting &&
+        _pulseController.isAnimating) {
+      _pulseController.stop();
+      _pulseController.reset();
+    }
+
+    // Configure audio for receiving
+    if (state == PttSessionState.receiving) {
+      ref.read(pttAudioStateProvider.notifier).startReceiving();
+    } else if (state == PttSessionState.idle) {
+      ref.read(pttAudioStateProvider.notifier).stop();
+    }
+
     return GestureDetector(
-      onTapDown: (_) => _startPtt(),
-      onTapUp: (_) => _endPtt(),
-      onTapCancel: () => _endPtt(),
+      onTapDown: (_) {
+        if (session.canStartPtt) {
+          _startPtt();
+        }
+      },
+      onTapUp: (_) {
+        if (state == PttSessionState.transmitting ||
+            state == PttSessionState.requestingFloor) {
+          _endPtt();
+        }
+      },
+      onTapCancel: () {
+        if (state == PttSessionState.transmitting ||
+            state == PttSessionState.requestingFloor) {
+          _endPtt();
+        }
+      },
       child: AnimatedBuilder(
         animation: _pulseAnimation,
         builder: (context, child) {
           return Transform.scale(
-            scale: _state == PttState.transmitting ? _pulseAnimation.value : 1.0,
+            scale: state == PttSessionState.transmitting
+                ? _pulseAnimation.value
+                : 1.0,
             child: child,
           );
         },
@@ -79,12 +134,12 @@ class _PttButtonState extends State<PttButton>
           height: 100,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: _getButtonColor(),
+            color: _getButtonColor(state),
             boxShadow: [
               BoxShadow(
-                color: _getButtonColor().withValues(alpha: 0.4),
-                blurRadius: _state == PttState.transmitting ? 24 : 12,
-                spreadRadius: _state == PttState.transmitting ? 4 : 0,
+                color: _getButtonColor(state).withValues(alpha: 0.4),
+                blurRadius: state == PttSessionState.transmitting ? 24 : 12,
+                spreadRadius: state == PttSessionState.transmitting ? 4 : 0,
               ),
             ],
           ),
@@ -92,7 +147,7 @@ class _PttButtonState extends State<PttButton>
             alignment: Alignment.center,
             children: [
               // Outer ring for receiving state
-              if (_state == PttState.receiving)
+              if (state == PttSessionState.receiving)
                 Container(
                   width: 120,
                   height: 120,
@@ -109,11 +164,11 @@ class _PttButtonState extends State<PttButton>
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Icon(
-                    _getIcon(),
+                    _getIcon(state),
                     size: 40,
-                    color: _getIconColor(),
+                    color: _getIconColor(state),
                   ),
-                  if (_state == PttState.transmitting) ...[
+                  if (state == PttSessionState.transmitting) ...[
                     const SizedBox(height: 4),
                     _buildAudioWave(),
                   ],
@@ -126,40 +181,45 @@ class _PttButtonState extends State<PttButton>
     );
   }
 
-  Color _getButtonColor() {
-    switch (_state) {
-      case PttState.idle:
+  Color _getButtonColor(PttSessionState state) {
+    switch (state) {
+      case PttSessionState.idle:
         return AppColors.pttIdle;
-      case PttState.requesting:
+      case PttSessionState.requestingFloor:
         return AppColors.pttWaiting;
-      case PttState.transmitting:
+      case PttSessionState.transmitting:
         return AppColors.pttActive;
-      case PttState.receiving:
+      case PttSessionState.receiving:
         return AppColors.pttReceiving;
+      case PttSessionState.error:
+        return AppColors.error;
     }
   }
 
-  Color _getIconColor() {
-    switch (_state) {
-      case PttState.idle:
+  Color _getIconColor(PttSessionState state) {
+    switch (state) {
+      case PttSessionState.idle:
         return AppColors.textSecondaryDark;
-      case PttState.requesting:
-      case PttState.transmitting:
-      case PttState.receiving:
+      case PttSessionState.requestingFloor:
+      case PttSessionState.transmitting:
+      case PttSessionState.receiving:
+      case PttSessionState.error:
         return Colors.white;
     }
   }
 
-  IconData _getIcon() {
-    switch (_state) {
-      case PttState.idle:
+  IconData _getIcon(PttSessionState state) {
+    switch (state) {
+      case PttSessionState.idle:
         return Icons.mic_none;
-      case PttState.requesting:
+      case PttSessionState.requestingFloor:
         return Icons.hourglass_empty;
-      case PttState.transmitting:
+      case PttSessionState.transmitting:
         return Icons.mic;
-      case PttState.receiving:
+      case PttSessionState.receiving:
         return Icons.volume_up;
+      case PttSessionState.error:
+        return Icons.error_outline;
     }
   }
 

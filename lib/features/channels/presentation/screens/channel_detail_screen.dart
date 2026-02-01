@@ -5,6 +5,8 @@ import 'package:go_router/go_router.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
 import '../../../../di/providers.dart';
+import '../../../ptt/domain/models/ptt_session_model.dart';
+import '../../../ptt/presentation/providers/ptt_providers.dart';
 import '../../../ptt/presentation/widgets/ptt_button.dart';
 import '../../domain/models/channel_model.dart';
 
@@ -96,6 +98,8 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
           ),
           body: Column(
             children: [
+              // Active speaker banner
+              _buildActiveSpeakerBanner(channel.id),
               // Active speakers area
               Expanded(
                 child: _buildActiveSpeakersArea(context, membersAsync),
@@ -110,6 +114,99 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildActiveSpeakerBanner(String channelId) {
+    final speaker = ref.watch(currentSpeakerProvider(channelId));
+    final isCurrentUser = ref.watch(isCurrentUserSpeakingProvider(channelId));
+
+    if (speaker == null) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: isCurrentUser ? AppColors.pttActive : AppColors.pttReceiving,
+        boxShadow: [
+          BoxShadow(
+            color: (isCurrentUser ? AppColors.pttActive : AppColors.pttReceiving)
+                .withValues(alpha: 0.3),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Icon(
+            isCurrentUser ? Icons.mic : Icons.volume_up,
+            color: Colors.white,
+            size: 20,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              isCurrentUser
+                  ? 'You are speaking'
+                  : '${speaker.name} is speaking',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+                fontSize: 14,
+              ),
+            ),
+          ),
+          if (!isCurrentUser)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _buildSpeakingIndicator(),
+                  const SizedBox(width: 6),
+                  const Text(
+                    'LIVE',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSpeakingIndicator() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(3, (index) {
+        return TweenAnimationBuilder<double>(
+          tween: Tween(begin: 4, end: 10),
+          duration: Duration(milliseconds: 300 + (index * 100)),
+          builder: (context, value, child) {
+            return Container(
+              width: 3,
+              height: value,
+              margin: const EdgeInsets.symmetric(horizontal: 1),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            );
+          },
+        );
+      }),
     );
   }
 
@@ -258,6 +355,15 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
   }
 
   Widget _buildPttArea(BuildContext context, ChannelModel channel) {
+    final session = ref.watch(pttSessionProvider(channel.id));
+    final statusText = switch (session.state) {
+      PttSessionState.idle => 'Hold to talk',
+      PttSessionState.requestingFloor => 'Requesting floor...',
+      PttSessionState.transmitting => 'Release to stop',
+      PttSessionState.receiving => 'Listening...',
+      PttSessionState.error => session.errorMessage ?? 'Error occurred',
+    };
+
     return Container(
       padding: const EdgeInsets.all(24),
       color: AppColors.surfaceDark,
@@ -266,16 +372,10 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
           // PTT button
           PttButton(
             channelId: channel.id,
-            onPttStart: () {
-              // TODO: Start PTT transmission
-            },
-            onPttEnd: () {
-              // TODO: End PTT transmission
-            },
           ),
           const SizedBox(height: 12),
           Text(
-            'Hold to talk',
+            statusText,
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: AppColors.textSecondaryDark,
                 ),
