@@ -51,22 +51,32 @@ class _PttButtonState extends ConsumerState<PttButton>
     HapticFeedback.heavyImpact();
     _pulseController.repeat(reverse: true);
 
-    // Configure audio and start PTT
-    await ref.read(pttAudioStateProvider.notifier).startTransmitting();
-    final success =
-        await ref.read(pttSessionProvider(widget.channelId).notifier).startPtt();
+    try {
+      // Configure audio and start PTT
+      await ref.read(pttAudioStateProvider.notifier).startTransmitting();
+      final success =
+          await ref.read(pttSessionProvider(widget.channelId).notifier).startPtt();
 
-    if (!success && mounted) {
-      _pulseController.stop();
-      _pulseController.reset();
-      await ref.read(pttAudioStateProvider.notifier).stop();
+      if (!success && mounted) {
+        _pulseController.stop();
+        _pulseController.reset();
+        await ref.read(pttAudioStateProvider.notifier).stop();
 
-      final session = ref.read(pttSessionProvider(widget.channelId));
-      if (session.errorMessage != null) {
-        context.showSnackBar(session.errorMessage!);
-        ref
-            .read(pttSessionProvider(widget.channelId).notifier)
-            .clearError();
+        final session = ref.read(pttSessionProvider(widget.channelId));
+        if (session.errorMessage != null) {
+          context.showSnackBar(session.errorMessage!);
+          ref
+              .read(pttSessionProvider(widget.channelId).notifier)
+              .clearError();
+        }
+      }
+    } catch (e) {
+      // Handle any unexpected errors
+      if (mounted) {
+        _pulseController.stop();
+        _pulseController.reset();
+        await ref.read(pttAudioStateProvider.notifier).stop();
+        context.showSnackBar('Failed to start PTT');
       }
     }
   }
@@ -76,14 +86,22 @@ class _PttButtonState extends ConsumerState<PttButton>
     _pulseController.stop();
     _pulseController.reset();
 
-    await ref.read(pttSessionProvider(widget.channelId).notifier).stopPtt();
-    await ref.read(pttAudioStateProvider.notifier).stop();
+    try {
+      await ref.read(pttSessionProvider(widget.channelId).notifier).stopPtt();
+      await ref.read(pttAudioStateProvider.notifier).stop();
+    } catch (e) {
+      // Ensure audio is stopped even if stopPtt fails
+      await ref.read(pttAudioStateProvider.notifier).stop();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final session = ref.watch(pttSessionProvider(widget.channelId));
     final state = _getState(session);
+
+    // Debug logging
+    debugPrint('PTT Button - State: $state, canStartPtt: ${session.canStartPtt}');
 
     // Update pulse animation based on state
     if (state == PttSessionState.transmitting && !_pulseController.isAnimating) {
@@ -103,8 +121,11 @@ class _PttButtonState extends ConsumerState<PttButton>
 
     return GestureDetector(
       onTapDown: (_) {
+        debugPrint('PTT Button - onTapDown triggered, canStartPtt: ${session.canStartPtt}');
         if (session.canStartPtt) {
           _startPtt();
+        } else {
+          debugPrint('PTT Button - Cannot start PTT, state is: $state');
         }
       },
       onTapUp: (_) {

@@ -33,7 +33,9 @@ sealed class PttSessionModel with _$PttSessionModel {
   bool get hasError => state == PttSessionState.error;
 
   bool get canStartPtt =>
-      state == PttSessionState.idle || state == PttSessionState.receiving;
+      state == PttSessionState.idle ||
+      state == PttSessionState.receiving ||
+      state == PttSessionState.error;
 }
 
 enum PeerConnectionStatus {

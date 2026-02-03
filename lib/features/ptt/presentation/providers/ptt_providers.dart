@@ -213,57 +213,71 @@ class PttSessionNotifier extends StateNotifier<PttSessionModel> {
     final channelRepo = _ref.read(channelRepositoryProvider);
     final webrtcService = _ref.read(webrtcServiceProvider(channelId));
 
-    // Request floor
-    final acquired = await pttRepo.requestFloor(
-      channelId: channelId,
-      speakerId: currentUser.uid,
-      speakerName: userProfile.displayName,
-    );
-
-    if (!acquired) {
-      state = state.copyWith(
-        state: PttSessionState.idle,
-        errorMessage: 'Floor is busy',
+    try {
+      // Request floor
+      final acquired = await pttRepo.requestFloor(
+        channelId: channelId,
+        speakerId: currentUser.uid,
+        speakerName: userProfile.displayName,
       );
-      return false;
-    }
 
-    // Initialize local stream
-    final localStream = await webrtcService.initLocalStream();
-    if (localStream == null) {
+      if (!acquired) {
+        state = state.copyWith(
+          state: PttSessionState.idle,
+          errorMessage: 'Floor is busy',
+        );
+        return false;
+      }
+
+      // Initialize local stream
+      final localStream = await webrtcService.initLocalStream();
+      if (localStream == null) {
+        await pttRepo.releaseFloor(
+          channelId: channelId,
+          speakerId: currentUser.uid,
+        );
+        state = state.copyWith(
+          state: PttSessionState.error,
+          errorMessage: 'Failed to access microphone',
+        );
+        return false;
+      }
+
+      // Get channel members and create offers
+      final members = await channelRepo.getChannelMembers(channelId).first;
+      final otherMembers = members
+          .where((m) => m.userId != currentUser.uid)
+          .map((m) => m.userId)
+          .toList();
+
+      // Create offers for all other members
+      for (final peerId in otherMembers) {
+        await webrtcService.createOfferAndSend(
+          currentUserId: currentUser.uid,
+          peerId: peerId,
+        );
+      }
+
+      state = state.copyWith(
+        state: PttSessionState.transmitting,
+        currentSpeakerId: currentUser.uid,
+        currentSpeakerName: userProfile.displayName,
+      );
+
+      return true;
+    } catch (e) {
+      // Clean up on error
       await pttRepo.releaseFloor(
         channelId: channelId,
         speakerId: currentUser.uid,
       );
+      await webrtcService.dispose();
       state = state.copyWith(
         state: PttSessionState.error,
-        errorMessage: 'Failed to access microphone',
+        errorMessage: 'Failed to start transmission',
       );
       return false;
     }
-
-    // Get channel members and create offers
-    final members = await channelRepo.getChannelMembers(channelId).first;
-    final otherMembers = members
-        .where((m) => m.userId != currentUser.uid)
-        .map((m) => m.userId)
-        .toList();
-
-    // Create offers for all other members
-    for (final peerId in otherMembers) {
-      await webrtcService.createOfferAndSend(
-        currentUserId: currentUser.uid,
-        peerId: peerId,
-      );
-    }
-
-    state = state.copyWith(
-      state: PttSessionState.transmitting,
-      currentSpeakerId: currentUser.uid,
-      currentSpeakerName: userProfile.displayName,
-    );
-
-    return true;
   }
 
   /// Stop PTT transmission
@@ -300,7 +314,10 @@ class PttSessionNotifier extends StateNotifier<PttSessionModel> {
   }
 
   void clearError() {
-    state = state.copyWith(errorMessage: null);
+    state = state.copyWith(
+      state: PttSessionState.idle,
+      errorMessage: null,
+    );
   }
 
   @override

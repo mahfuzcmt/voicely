@@ -18,7 +18,20 @@
       "Bash(timeout:*)",
       "Bash(\"C:\\\\Users\\\\Local Admin\\\\Downloads\\\\flutter_windows_3.38.8-stable\\\\flutter\\\\bin\\\\flutter.bat\" pub run build_runner build --delete-conflicting-outputs)",
       "Bash(\"C:\\\\Users\\\\Local Admin\\\\Downloads\\\\flutter_windows_3.38.8-stable\\\\flutter\\\\bin\\\\flutter.bat\" analyze)",
-      "Bash(\"C:\\\\Users\\\\Local Admin\\\\Downloads\\\\flutter_windows_3.38.8-stable\\\\flutter\\\\bin\\\\flutter.bat\" pub run build_runner clean)"
+      "Bash(\"C:\\\\Users\\\\Local Admin\\\\Downloads\\\\flutter_windows_3.38.8-stable\\\\flutter\\\\bin\\\\flutter.bat\" pub run build_runner clean)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter doctor:*)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter analyze:*)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter pub get:*)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/dart run build_runner build:*)",
+      "Bash(dart pub global:*)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter build:*)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter clean:*)",
+      "Bash(unzip:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter pub:*)",
+      "Bash(flutter pub get:*)"
     ]
   }
 }
