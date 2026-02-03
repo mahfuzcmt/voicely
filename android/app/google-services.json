@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "842514114359",
+    "project_id": "voicely-1d3b2",
+    "storage_bucket": "voicely-1d3b2.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:842514114359:android:3b9e29dc1f8589a9db5cb2",
+        "android_client_info": {
+          "package_name": "com.bitsoft.voicely"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA1KsBNX2HQnkRc4OjW10NDdNrKj-p2se0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
