@@ -75,9 +75,9 @@ class ProfileScreen extends ConsumerWidget {
                 ),
           ),
           const SizedBox(height: 4),
-          // Email
+          // Phone number
           Text(
-            user.email,
+            user.phoneNumber,
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: AppColors.textSecondaryDark,
                 ),

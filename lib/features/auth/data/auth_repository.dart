@@ -30,11 +30,21 @@ class AuthRepository {
 
   User? get currentUser => _auth.currentUser;
 
-  Future<UserModel> signInWithEmailAndPassword({
-    required String email,
+  /// Convert phone number to email format for Firebase Auth
+  /// Firebase Auth doesn't support username/password, so we use phone@voicely.app
+  String _phoneToEmail(String phoneNumber) {
+    // Remove any non-numeric characters except + for country code
+    final cleanPhone = phoneNumber.replaceAll(RegExp(r'[^\d+]'), '');
+    return '$cleanPhone@voicely.app';
+  }
+
+  /// Sign in with phone number and password
+  Future<UserModel> signInWithPhoneNumber({
+    required String phoneNumber,
     required String password,
   }) async {
     try {
+      final email = _phoneToEmail(phoneNumber);
       final credential = await _auth.signInWithEmailAndPassword(
         email: email,
         password: password,
@@ -50,12 +60,14 @@ class AuthRepository {
     }
   }
 
-  Future<UserModel> createUserWithEmailAndPassword({
-    required String email,
+  /// Create user with phone number (for admin use)
+  Future<UserModel> createUserWithPhoneNumber({
+    required String phoneNumber,
     required String password,
     required String displayName,
   }) async {
     try {
+      final email = _phoneToEmail(phoneNumber);
       final credential = await _auth.createUserWithEmailAndPassword(
         email: email,
         password: password,
@@ -67,8 +79,9 @@ class AuthRepository {
 
       final userModel = UserModel(
         id: user.uid,
-        email: email,
+        phoneNumber: phoneNumber,
         displayName: displayName,
+        email: email,
         status: UserStatus.online,
         createdAt: DateTime.now(),
       );
@@ -119,7 +132,8 @@ class AuthRepository {
     }
   }
 
-  Future<void> resetPassword(String email) async {
+  Future<void> resetPassword(String phoneNumber) async {
+    final email = _phoneToEmail(phoneNumber);
     await _auth.sendPasswordResetEmail(email: email);
   }
 

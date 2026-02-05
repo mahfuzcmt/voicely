@@ -3,11 +3,9 @@ import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/auth/presentation/screens/login_screen.dart';
-import '../../features/auth/presentation/screens/register_screen.dart';
 import '../../features/auth/presentation/screens/splash_screen.dart';
 import '../../features/channels/presentation/screens/channels_screen.dart';
 import '../../features/channels/presentation/screens/channel_detail_screen.dart';
-import '../../features/channels/presentation/screens/create_channel_screen.dart';
 import '../../features/auth/presentation/screens/profile_screen.dart';
 import '../../di/providers.dart';
 
@@ -20,14 +18,17 @@ final routerProvider = Provider<GoRouter>((ref) {
     redirect: (context, state) {
       final isLoading = authState.isLoading;
       final isLoggedIn = authState.value != null;
-      final isAuthRoute = state.matchedLocation == '/login' ||
-          state.matchedLocation == '/register';
+      final isAuthRoute = state.matchedLocation == '/login';
       final isSplash = state.matchedLocation == '/';
 
+      debugPrint('Router: isLoading=$isLoading, isLoggedIn=$isLoggedIn, path=${state.matchedLocation}');
+
+      // While loading, stay on or go to splash
       if (isLoading && isSplash) return null;
       if (isLoading) return '/';
 
-      if (!isLoggedIn && !isAuthRoute && !isSplash) return '/login';
+      // Not loading anymore - redirect based on auth state
+      if (!isLoggedIn && !isAuthRoute) return '/login';
       if (isLoggedIn && (isAuthRoute || isSplash)) return '/channels';
 
       return null;
@@ -44,20 +45,10 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const LoginScreen(),
       ),
       GoRoute(
-        path: '/register',
-        name: 'register',
-        builder: (context, state) => const RegisterScreen(),
-      ),
-      GoRoute(
         path: '/channels',
         name: 'channels',
         builder: (context, state) => const ChannelsScreen(),
         routes: [
-          GoRoute(
-            path: 'create',
-            name: 'createChannel',
-            builder: (context, state) => const CreateChannelScreen(),
-          ),
           GoRoute(
             path: ':channelId',
             name: 'channelDetail',

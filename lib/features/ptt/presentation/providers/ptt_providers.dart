@@ -4,6 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../di/providers.dart';
 import '../../../channels/data/channel_repository.dart';
+import '../../../messaging/data/message_repository.dart';
+import '../../data/audio_recording_service.dart';
+import '../../data/audio_storage_service.dart';
 import '../../data/ptt_repository.dart';
 import '../../data/signaling_repository.dart';
 import '../../data/webrtc_service.dart';
@@ -61,6 +64,8 @@ class PttSessionNotifier extends StateNotifier<PttSessionModel> {
 
   final Set<String> _processedSignalingIds = {};
   final Set<String> _processedIceCandidateIds = {};
+
+  DateTime? _transmissionStartTime;
 
   PttSessionNotifier({
     required Ref ref,
@@ -212,6 +217,7 @@ class PttSessionNotifier extends StateNotifier<PttSessionModel> {
     final pttRepo = _ref.read(pttRepositoryProvider);
     final channelRepo = _ref.read(channelRepositoryProvider);
     final webrtcService = _ref.read(webrtcServiceProvider(channelId));
+    final audioRecordingService = _ref.read(audioRecordingServiceProvider);
 
     try {
       // Request floor
@@ -243,6 +249,9 @@ class PttSessionNotifier extends StateNotifier<PttSessionModel> {
         return false;
       }
 
+      // Start audio recording for storage
+      await audioRecordingService.startRecording();
+
       // Get channel members and create offers
       final members = await channelRepo.getChannelMembers(channelId).first;
       final otherMembers = members
@@ -258,6 +267,9 @@ class PttSessionNotifier extends StateNotifier<PttSessionModel> {
         );
       }
 
+      // Track transmission start time
+      _transmissionStartTime = DateTime.now();
+
       state = state.copyWith(
         state: PttSessionState.transmitting,
         currentSpeakerId: currentUser.uid,
@@ -272,6 +284,7 @@ class PttSessionNotifier extends StateNotifier<PttSessionModel> {
         speakerId: currentUser.uid,
       );
       await webrtcService.dispose();
+      await audioRecordingService.cancelRecording();
       state = state.copyWith(
         state: PttSessionState.error,
         errorMessage: 'Failed to start transmission',
@@ -288,6 +301,45 @@ class PttSessionNotifier extends StateNotifier<PttSessionModel> {
     final pttRepo = _ref.read(pttRepositoryProvider);
     final signalingRepo = _ref.read(signalingRepositoryProvider);
     final webrtcService = _ref.read(webrtcServiceProvider(channelId));
+    final messageRepo = _ref.read(messageRepositoryProvider);
+    final audioRecordingService = _ref.read(audioRecordingServiceProvider);
+    final audioStorageService = _ref.read(audioStorageServiceProvider);
+
+    // Calculate transmission duration
+    int durationSeconds = 0;
+    if (_transmissionStartTime != null) {
+      durationSeconds =
+          DateTime.now().difference(_transmissionStartTime!).inSeconds;
+    }
+
+    // Stop recording and get file path
+    final audioFilePath = await audioRecordingService.stopRecording();
+
+    // Upload to Firebase Storage
+    String? audioUrl;
+    if (audioFilePath != null) {
+      audioUrl = await audioStorageService.uploadAudio(
+        filePath: audioFilePath,
+        channelId: channelId,
+      );
+    }
+
+    // Save audio message record (minimum 1 second)
+    if (durationSeconds >= 1) {
+      final userProfile = await _ref.read(currentUserProvider.future);
+      if (userProfile != null) {
+        await messageRepo.sendAudioMessage(
+          channelId: channelId,
+          senderId: currentUser.uid,
+          senderName: userProfile.displayName,
+          senderPhotoUrl: userProfile.photoUrl,
+          durationSeconds: durationSeconds,
+          audioUrl: audioUrl,
+        );
+      }
+    }
+
+    _transmissionStartTime = null;
 
     // Release floor
     await pttRepo.releaseFloor(
@@ -316,6 +368,26 @@ class PttSessionNotifier extends StateNotifier<PttSessionModel> {
   void clearError() {
     state = state.copyWith(
       state: PttSessionState.idle,
+      errorMessage: null,
+    );
+  }
+
+  /// Reset stuck state and force release floor
+  Future<void> forceReset() async {
+    final currentUser = _ref.read(authStateProvider).value;
+    if (currentUser == null) return;
+
+    final pttRepo = _ref.read(pttRepositoryProvider);
+    final webrtcService = _ref.read(webrtcServiceProvider(channelId));
+
+    // Force release the floor
+    await pttRepo.forceReleaseFloor(channelId);
+    await webrtcService.dispose();
+
+    state = state.copyWith(
+      state: PttSessionState.idle,
+      currentSpeakerId: null,
+      currentSpeakerName: null,
       errorMessage: null,
     );
   }

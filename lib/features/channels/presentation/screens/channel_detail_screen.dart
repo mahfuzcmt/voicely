@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
-
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
 import '../../../../di/providers.dart';
+import '../../../messaging/presentation/widgets/messages_list.dart';
 import '../../../ptt/domain/models/ptt_session_model.dart';
 import '../../../ptt/presentation/providers/ptt_providers.dart';
 import '../../../ptt/presentation/widgets/ptt_button.dart';
@@ -28,7 +27,6 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
   Widget build(BuildContext context) {
     final channelAsync = ref.watch(channelProvider(widget.channelId));
     final membersAsync = ref.watch(channelMembersProvider(widget.channelId));
-    final currentUser = ref.watch(authStateProvider).value;
 
     return channelAsync.when(
       loading: () => const Scaffold(
@@ -46,8 +44,6 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
           );
         }
 
-        final isOwner = channel.ownerId == currentUser?.uid;
-
         return Scaffold(
           appBar: AppBar(
             title: Text(channel.name),
@@ -56,44 +52,6 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
                 icon: const Icon(Icons.info_outline),
                 onPressed: () => _showChannelInfo(context, channel),
               ),
-              if (isOwner)
-                PopupMenuButton<String>(
-                  onSelected: (value) => _handleMenuAction(value, channel),
-                  itemBuilder: (context) => [
-                    const PopupMenuItem(
-                      value: 'edit',
-                      child: ListTile(
-                        leading: Icon(Icons.edit),
-                        title: Text('Edit Channel'),
-                        contentPadding: EdgeInsets.zero,
-                      ),
-                    ),
-                    const PopupMenuItem(
-                      value: 'delete',
-                      child: ListTile(
-                        leading: Icon(Icons.delete, color: AppColors.error),
-                        title:
-                            Text('Delete', style: TextStyle(color: AppColors.error)),
-                        contentPadding: EdgeInsets.zero,
-                      ),
-                    ),
-                  ],
-                )
-              else
-                PopupMenuButton<String>(
-                  onSelected: (value) => _handleMenuAction(value, channel),
-                  itemBuilder: (context) => [
-                    const PopupMenuItem(
-                      value: 'leave',
-                      child: ListTile(
-                        leading: Icon(Icons.exit_to_app, color: AppColors.error),
-                        title:
-                            Text('Leave', style: TextStyle(color: AppColors.error)),
-                        contentPadding: EdgeInsets.zero,
-                      ),
-                    ),
-                  ],
-                ),
             ],
           ),
           body: Column(
@@ -104,9 +62,9 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
               Expanded(
                 child: _buildActiveSpeakersArea(context, membersAsync),
               ),
-              // Messages area (placeholder)
+              // Messages area
               Expanded(
-                child: _buildMessagesArea(context),
+                child: _buildMessagesArea(context, channel.id),
               ),
               // PTT button area
               _buildPttArea(context, channel),
@@ -293,71 +251,20 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
     );
   }
 
-  Widget _buildMessagesArea(BuildContext context) {
+  Widget _buildMessagesArea(BuildContext context, String channelId) {
     return Container(
-      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: AppColors.cardDark,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                'Messages',
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-              ),
-              TextButton.icon(
-                onPressed: () {
-                  // TODO: Navigate to full chat
-                  context.showSnackBar('Full chat coming soon');
-                },
-                icon: const Icon(Icons.chat_bubble_outline, size: 18),
-                label: const Text('View All'),
-              ),
-            ],
-          ),
-          const Expanded(
-            child: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.chat_bubble_outline,
-                    size: 48,
-                    color: AppColors.textSecondaryDark,
-                  ),
-                  SizedBox(height: 12),
-                  Text(
-                    'No messages yet',
-                    style: TextStyle(color: AppColors.textSecondaryDark),
-                  ),
-                  SizedBox(height: 4),
-                  Text(
-                    'Start a conversation or use PTT',
-                    style: TextStyle(
-                      color: AppColors.textSecondaryDark,
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
+      child: MessagesList(channelId: channelId),
     );
   }
 
   Widget _buildPttArea(BuildContext context, ChannelModel channel) {
     final session = ref.watch(pttSessionProvider(channel.id));
     final statusText = switch (session.state) {
-      PttSessionState.idle => 'Hold to talk',
+      PttSessionState.idle => 'Hold to talk (long-press to reset)',
       PttSessionState.requestingFloor => 'Requesting floor...',
       PttSessionState.transmitting => 'Release to stop',
       PttSessionState.receiving => 'Listening...',
@@ -379,6 +286,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: AppColors.textSecondaryDark,
                 ),
+            textAlign: TextAlign.center,
           ),
         ],
       ),
@@ -458,82 +366,4 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
     );
   }
 
-  void _handleMenuAction(String action, ChannelModel channel) {
-    switch (action) {
-      case 'edit':
-        // TODO: Navigate to edit screen
-        context.showSnackBar('Edit channel coming soon');
-        break;
-      case 'delete':
-        _showDeleteDialog(channel);
-        break;
-      case 'leave':
-        _showLeaveDialog(channel);
-        break;
-    }
-  }
-
-  void _showDeleteDialog(ChannelModel channel) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Channel'),
-        content: Text(
-          'Are you sure you want to delete "${channel.name}"? This action cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              await ref
-                  .read(channelNotifierProvider.notifier)
-                  .deleteChannel(channel.id);
-              if (mounted) {
-                context.go('/channels');
-              }
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.error,
-            ),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showLeaveDialog(ChannelModel channel) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Leave Channel'),
-        content: Text('Are you sure you want to leave "${channel.name}"?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              await ref
-                  .read(channelNotifierProvider.notifier)
-                  .leaveChannel(channel.id);
-              if (mounted) {
-                context.go('/channels');
-              }
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.error,
-            ),
-            child: const Text('Leave'),
-          ),
-        ],
-      ),
-    );
-  }
 }

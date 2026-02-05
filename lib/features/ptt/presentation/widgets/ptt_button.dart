@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
+import '../../data/audio_recording_service.dart';
 import '../../domain/models/ptt_session_model.dart';
 import '../providers/audio_providers.dart';
 import '../providers/ptt_providers.dart';
@@ -47,7 +48,35 @@ class _PttButtonState extends ConsumerState<PttButton>
     return session.state;
   }
 
+  void _forceRelease() async {
+    HapticFeedback.heavyImpact();
+    await ref.read(pttSessionProvider(widget.channelId).notifier).forceReset();
+    if (mounted) {
+      context.showSnackBar('Floor released');
+    }
+  }
+
   void _startPtt() async {
+    final session = ref.read(pttSessionProvider(widget.channelId));
+
+    // Check microphone permission first
+    final hasPermission = await ref.read(audioRecordingServiceProvider).hasPermission();
+    if (!hasPermission) {
+      if (mounted) {
+        context.showSnackBar('Microphone permission required');
+      }
+      return;
+    }
+
+    // If stuck in requestingFloor or error state, reset first
+    if (session.state == PttSessionState.requestingFloor ||
+        session.state == PttSessionState.error) {
+      debugPrint('PTT Button - Resetting stuck state: ${session.state}');
+      await ref.read(pttSessionProvider(widget.channelId).notifier).forceReset();
+      // Small delay to allow state to settle
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+
     HapticFeedback.heavyImpact();
     _pulseController.repeat(reverse: true);
 
@@ -62,9 +91,9 @@ class _PttButtonState extends ConsumerState<PttButton>
         _pulseController.reset();
         await ref.read(pttAudioStateProvider.notifier).stop();
 
-        final session = ref.read(pttSessionProvider(widget.channelId));
-        if (session.errorMessage != null) {
-          context.showSnackBar(session.errorMessage!);
+        final errorSession = ref.read(pttSessionProvider(widget.channelId));
+        if (errorSession.errorMessage != null) {
+          context.showSnackBar(errorSession.errorMessage!);
           ref
               .read(pttSessionProvider(widget.channelId).notifier)
               .clearError();
@@ -72,10 +101,12 @@ class _PttButtonState extends ConsumerState<PttButton>
       }
     } catch (e) {
       // Handle any unexpected errors
+      debugPrint('PTT Button - Exception in startPtt: $e');
       if (mounted) {
         _pulseController.stop();
         _pulseController.reset();
         await ref.read(pttAudioStateProvider.notifier).stop();
+        await ref.read(pttSessionProvider(widget.channelId).notifier).forceReset();
         context.showSnackBar('Failed to start PTT');
       }
     }
@@ -120,6 +151,11 @@ class _PttButtonState extends ConsumerState<PttButton>
     }
 
     return GestureDetector(
+      onLongPress: () {
+        // Long press to force release stuck floor
+        debugPrint('PTT Button - Long press detected, forcing floor release');
+        _forceRelease();
+      },
       onTapDown: (_) {
         debugPrint('PTT Button - onTapDown triggered, canStartPtt: ${session.canStartPtt}');
         if (session.canStartPtt) {

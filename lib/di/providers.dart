@@ -67,23 +67,12 @@ class AuthNotifier extends StateNotifier<AsyncValue<void>> {
 
   AuthNotifier(this._authRepo) : super(const AsyncValue.data(null));
 
-  Future<void> signIn(String email, String password) async {
+  Future<void> signIn(String phoneNumber, String password) async {
     state = const AsyncValue.loading();
     state = await AsyncValue.guard(
-      () => _authRepo.signInWithEmailAndPassword(
-        email: email,
+      () => _authRepo.signInWithPhoneNumber(
+        phoneNumber: phoneNumber,
         password: password,
-      ),
-    );
-  }
-
-  Future<void> signUp(String email, String password, String displayName) async {
-    state = const AsyncValue.loading();
-    state = await AsyncValue.guard(
-      () => _authRepo.createUserWithEmailAndPassword(
-        email: email,
-        password: password,
-        displayName: displayName,
       ),
     );
   }
@@ -93,9 +82,9 @@ class AuthNotifier extends StateNotifier<AsyncValue<void>> {
     state = await AsyncValue.guard(() => _authRepo.signOut());
   }
 
-  Future<void> resetPassword(String email) async {
+  Future<void> resetPassword(String phoneNumber) async {
     state = const AsyncValue.loading();
-    state = await AsyncValue.guard(() => _authRepo.resetPassword(email));
+    state = await AsyncValue.guard(() => _authRepo.resetPassword(phoneNumber));
   }
 }
 

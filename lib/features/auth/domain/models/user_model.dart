@@ -12,8 +12,9 @@ sealed class UserModel with _$UserModel {
 
   const factory UserModel({
     required String id,
-    required String email,
+    required String phoneNumber,
     required String displayName,
+    String? email,
     String? photoUrl,
     @Default(UserStatus.offline) UserStatus status,
     DateTime? lastSeen,
@@ -28,8 +29,9 @@ sealed class UserModel with _$UserModel {
     final data = doc.data() as Map<String, dynamic>;
     return UserModel(
       id: doc.id,
-      email: data['email'] ?? '',
+      phoneNumber: data['phoneNumber'] ?? '',
       displayName: data['displayName'] ?? '',
+      email: data['email'],
       photoUrl: data['photoUrl'],
       status: UserStatus.values.firstWhere(
         (e) => e.name == data['status'],
@@ -43,8 +45,9 @@ sealed class UserModel with _$UserModel {
 
   Map<String, dynamic> toFirestore() {
     return {
-      'email': email,
+      'phoneNumber': phoneNumber,
       'displayName': displayName,
+      'email': email,
       'photoUrl': photoUrl,
       'status': status.name,
       'lastSeen': lastSeen != null ? Timestamp.fromDate(lastSeen!) : null,
