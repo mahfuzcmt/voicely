@@ -50,12 +50,11 @@ class ChannelsScreen extends ConsumerWidget {
           error: (_, __) => const Icon(Icons.person),
         ),
         actions: [
+          // Create user button
           IconButton(
-            icon: const Icon(Icons.search),
-            onPressed: () {
-              // TODO: Implement search
-              context.showSnackBar('Search coming soon');
-            },
+            icon: const Icon(Icons.person_add),
+            tooltip: 'Create User',
+            onPressed: () => context.pushNamed('createUser'),
           ),
         ],
       ),
@@ -85,10 +84,6 @@ class ChannelsScreen extends ConsumerWidget {
           return _buildChannelList(context, ref, channels);
         },
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => context.pushNamed('createChannel'),
-        child: const Icon(Icons.add),
-      ),
     );
   }
 
@@ -114,24 +109,18 @@ class ChannelsScreen extends ConsumerWidget {
             ),
             const SizedBox(height: 24),
             Text(
-              'No Channels Yet',
+              'No Channels Assigned',
               style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                     fontWeight: FontWeight.bold,
                   ),
             ),
             const SizedBox(height: 8),
             Text(
-              'Create a channel or join an existing one to start communicating with your team.',
+              'Contact your administrator to get assigned to a channel.',
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                     color: AppColors.textSecondaryDark,
                   ),
               textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              onPressed: () => context.pushNamed('createChannel'),
-              icon: const Icon(Icons.add),
-              label: const Text('Create Channel'),
             ),
           ],
         ),

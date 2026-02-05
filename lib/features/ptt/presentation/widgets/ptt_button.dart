@@ -4,9 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
-import '../../data/audio_recording_service.dart';
-import '../../domain/models/ptt_session_model.dart';
-import '../providers/audio_providers.dart';
 import '../providers/ptt_providers.dart';
 
 class PttButton extends ConsumerStatefulWidget {
@@ -44,193 +41,117 @@ class _PttButtonState extends ConsumerState<PttButton>
     super.dispose();
   }
 
-  PttSessionState _getState(PttSessionModel session) {
-    return session.state;
-  }
-
-  void _forceRelease() async {
-    HapticFeedback.heavyImpact();
-    await ref.read(pttSessionProvider(widget.channelId).notifier).forceReset();
-    if (mounted) {
-      context.showSnackBar('Floor released');
-    }
-  }
-
-  void _startPtt() async {
+  void _onPressStart() async {
     final session = ref.read(pttSessionProvider(widget.channelId));
 
-    // Check microphone permission first
-    final hasPermission = await ref.read(audioRecordingServiceProvider).hasPermission();
-    if (!hasPermission) {
-      if (mounted) {
-        context.showSnackBar('Microphone permission required');
+    if (!session.canRecord) {
+      if (session.state == PttState.error) {
+        ref.read(pttSessionProvider(widget.channelId).notifier).clearError();
       }
       return;
-    }
-
-    // If stuck in requestingFloor or error state, reset first
-    if (session.state == PttSessionState.requestingFloor ||
-        session.state == PttSessionState.error) {
-      debugPrint('PTT Button - Resetting stuck state: ${session.state}');
-      await ref.read(pttSessionProvider(widget.channelId).notifier).forceReset();
-      // Small delay to allow state to settle
-      await Future.delayed(const Duration(milliseconds: 100));
     }
 
     HapticFeedback.heavyImpact();
     _pulseController.repeat(reverse: true);
 
-    try {
-      // Configure audio and start PTT
-      await ref.read(pttAudioStateProvider.notifier).startTransmitting();
-      final success =
-          await ref.read(pttSessionProvider(widget.channelId).notifier).startPtt();
+    final success = await ref
+        .read(pttSessionProvider(widget.channelId).notifier)
+        .startRecording();
 
-      if (!success && mounted) {
-        _pulseController.stop();
-        _pulseController.reset();
-        await ref.read(pttAudioStateProvider.notifier).stop();
+    if (!success && mounted) {
+      _pulseController.stop();
+      _pulseController.reset();
 
-        final errorSession = ref.read(pttSessionProvider(widget.channelId));
-        if (errorSession.errorMessage != null) {
-          context.showSnackBar(errorSession.errorMessage!);
-          ref
-              .read(pttSessionProvider(widget.channelId).notifier)
-              .clearError();
-        }
-      }
-    } catch (e) {
-      // Handle any unexpected errors
-      debugPrint('PTT Button - Exception in startPtt: $e');
-      if (mounted) {
-        _pulseController.stop();
-        _pulseController.reset();
-        await ref.read(pttAudioStateProvider.notifier).stop();
-        await ref.read(pttSessionProvider(widget.channelId).notifier).forceReset();
-        context.showSnackBar('Failed to start PTT');
+      final errorSession = ref.read(pttSessionProvider(widget.channelId));
+      if (errorSession.errorMessage != null) {
+        context.showSnackBar(errorSession.errorMessage!, isError: true);
+        ref.read(pttSessionProvider(widget.channelId).notifier).clearError();
       }
     }
   }
 
-  void _endPtt() async {
+  void _onPressEnd() async {
+    final session = ref.read(pttSessionProvider(widget.channelId));
+
+    if (!session.isRecording) return;
+
     HapticFeedback.lightImpact();
     _pulseController.stop();
     _pulseController.reset();
 
-    try {
-      await ref.read(pttSessionProvider(widget.channelId).notifier).stopPtt();
-      await ref.read(pttAudioStateProvider.notifier).stop();
-    } catch (e) {
-      // Ensure audio is stopped even if stopPtt fails
-      await ref.read(pttAudioStateProvider.notifier).stop();
+    final success = await ref
+        .read(pttSessionProvider(widget.channelId).notifier)
+        .stopRecordingAndSend();
+
+    if (mounted) {
+      if (success) {
+        context.showSnackBar('Voice message sent!');
+      } else {
+        final errorSession = ref.read(pttSessionProvider(widget.channelId));
+        if (errorSession.errorMessage != null) {
+          context.showSnackBar(errorSession.errorMessage!, isError: true);
+          ref.read(pttSessionProvider(widget.channelId).notifier).clearError();
+        }
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final session = ref.watch(pttSessionProvider(widget.channelId));
-    final state = _getState(session);
-
-    // Debug logging
-    debugPrint('PTT Button - State: $state, canStartPtt: ${session.canStartPtt}');
 
     // Update pulse animation based on state
-    if (state == PttSessionState.transmitting && !_pulseController.isAnimating) {
+    if (session.isRecording && !_pulseController.isAnimating) {
       _pulseController.repeat(reverse: true);
-    } else if (state != PttSessionState.transmitting &&
-        _pulseController.isAnimating) {
+    } else if (!session.isRecording && _pulseController.isAnimating) {
       _pulseController.stop();
       _pulseController.reset();
     }
 
-    // Configure audio for receiving
-    if (state == PttSessionState.receiving) {
-      ref.read(pttAudioStateProvider.notifier).startReceiving();
-    } else if (state == PttSessionState.idle) {
-      ref.read(pttAudioStateProvider.notifier).stop();
-    }
-
     return GestureDetector(
-      onLongPress: () {
-        // Long press to force release stuck floor
-        debugPrint('PTT Button - Long press detected, forcing floor release');
-        _forceRelease();
-      },
-      onTapDown: (_) {
-        debugPrint('PTT Button - onTapDown triggered, canStartPtt: ${session.canStartPtt}');
-        if (session.canStartPtt) {
-          _startPtt();
-        } else {
-          debugPrint('PTT Button - Cannot start PTT, state is: $state');
-        }
-      },
-      onTapUp: (_) {
-        if (state == PttSessionState.transmitting ||
-            state == PttSessionState.requestingFloor) {
-          _endPtt();
-        }
-      },
+      onTapDown: (_) => _onPressStart(),
+      onTapUp: (_) => _onPressEnd(),
       onTapCancel: () {
-        if (state == PttSessionState.transmitting ||
-            state == PttSessionState.requestingFloor) {
-          _endPtt();
+        if (session.isRecording) {
+          ref.read(pttSessionProvider(widget.channelId).notifier).cancelRecording();
+          _pulseController.stop();
+          _pulseController.reset();
         }
       },
       child: AnimatedBuilder(
         animation: _pulseAnimation,
         builder: (context, child) {
           return Transform.scale(
-            scale: state == PttSessionState.transmitting
-                ? _pulseAnimation.value
-                : 1.0,
+            scale: session.isRecording ? _pulseAnimation.value : 1.0,
             child: child,
           );
         },
         child: Container(
-          width: 100,
-          height: 100,
+          width: 120,
+          height: 120,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: _getButtonColor(state),
+            color: _getButtonColor(session.state),
             boxShadow: [
               BoxShadow(
-                color: _getButtonColor(state).withValues(alpha: 0.4),
-                blurRadius: state == PttSessionState.transmitting ? 24 : 12,
-                spreadRadius: state == PttSessionState.transmitting ? 4 : 0,
+                color: _getButtonColor(session.state).withValues(alpha: 0.4),
+                blurRadius: session.isRecording ? 30 : 15,
+                spreadRadius: session.isRecording ? 5 : 0,
               ),
             ],
           ),
-          child: Stack(
-            alignment: Alignment.center,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Outer ring for receiving state
-              if (state == PttSessionState.receiving)
-                Container(
-                  width: 120,
-                  height: 120,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: AppColors.pttReceiving,
-                      width: 3,
-                    ),
-                  ),
-                ),
-              // Inner content
-              Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    _getIcon(state),
-                    size: 40,
-                    color: _getIconColor(state),
-                  ),
-                  if (state == PttSessionState.transmitting) ...[
-                    const SizedBox(height: 4),
-                    _buildAudioWave(),
-                  ],
-                ],
+              Icon(
+                _getIcon(session.state),
+                size: 48,
+                color: Colors.white,
               ),
+              if (session.isRecording) ...[
+                const SizedBox(height: 4),
+                _buildRecordingIndicator(),
+              ],
             ],
           ),
         ),
@@ -238,56 +159,38 @@ class _PttButtonState extends ConsumerState<PttButton>
     );
   }
 
-  Color _getButtonColor(PttSessionState state) {
+  Color _getButtonColor(PttState state) {
     switch (state) {
-      case PttSessionState.idle:
-        return AppColors.pttIdle;
-      case PttSessionState.requestingFloor:
-        return AppColors.pttWaiting;
-      case PttSessionState.transmitting:
-        return AppColors.pttActive;
-      case PttSessionState.receiving:
-        return AppColors.pttReceiving;
-      case PttSessionState.error:
+      case PttState.idle:
+        return AppColors.primary;
+      case PttState.recording:
+        return Colors.red;
+      case PttState.uploading:
+        return Colors.orange;
+      case PttState.error:
         return AppColors.error;
     }
   }
 
-  Color _getIconColor(PttSessionState state) {
+  IconData _getIcon(PttState state) {
     switch (state) {
-      case PttSessionState.idle:
-        return AppColors.textSecondaryDark;
-      case PttSessionState.requestingFloor:
-      case PttSessionState.transmitting:
-      case PttSessionState.receiving:
-      case PttSessionState.error:
-        return Colors.white;
-    }
-  }
-
-  IconData _getIcon(PttSessionState state) {
-    switch (state) {
-      case PttSessionState.idle:
-        return Icons.mic_none;
-      case PttSessionState.requestingFloor:
-        return Icons.hourglass_empty;
-      case PttSessionState.transmitting:
+      case PttState.idle:
         return Icons.mic;
-      case PttSessionState.receiving:
-        return Icons.volume_up;
-      case PttSessionState.error:
+      case PttState.recording:
+        return Icons.mic;
+      case PttState.uploading:
+        return Icons.cloud_upload;
+      case PttState.error:
         return Icons.error_outline;
     }
   }
 
-  Widget _buildAudioWave() {
+  Widget _buildRecordingIndicator() {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: List.generate(
         5,
-        (index) => _AudioBar(
-          delay: index * 100,
-        ),
+        (index) => _AudioBar(delay: index * 100),
       ),
     );
   }
@@ -314,7 +217,7 @@ class _AudioBarState extends State<_AudioBar>
       vsync: this,
       duration: const Duration(milliseconds: 400),
     );
-    _animation = Tween<double>(begin: 4, end: 12).animate(
+    _animation = Tween<double>(begin: 4, end: 14).animate(
       CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
     );
 

@@ -16,6 +16,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+
+    <!-- Background playback -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
 
     <!-- Wake lock for audio -->
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
@@ -57,9 +64,39 @@
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="voicely_channel" />
 
+        <!-- High priority for FCM -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@mipmap/ic_launcher" />
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- Boot receiver for background service -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
+        </receiver>
+
+        <!-- Notification receiver -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver"
+            android:exported="false" />
+
+        <!-- Audio playback service -->
+        <service
+            android:name="com.ryanheise.audioservice.AudioService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
     </application>
 
     <queries>

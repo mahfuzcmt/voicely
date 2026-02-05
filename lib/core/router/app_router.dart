@@ -7,6 +7,7 @@ import '../../features/auth/presentation/screens/splash_screen.dart';
 import '../../features/channels/presentation/screens/channels_screen.dart';
 import '../../features/channels/presentation/screens/channel_detail_screen.dart';
 import '../../features/auth/presentation/screens/profile_screen.dart';
+import '../../features/auth/presentation/screens/create_user_screen.dart';
 import '../../di/providers.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -63,6 +64,11 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/profile',
         name: 'profile',
         builder: (context, state) => const ProfileScreen(),
+      ),
+      GoRoute(
+        path: '/create-user',
+        name: 'createUser',
+        builder: (context, state) => const CreateUserScreen(),
       ),
     ],
     errorBuilder: (context, state) => Scaffold(

@@ -3,9 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../../core/theme/app_colors.dart';
-import '../../../../core/utils/extensions.dart';
 import '../../../../di/providers.dart';
 import '../../domain/models/user_model.dart';
+
+// Global auto-play setting provider
+final autoPlayEnabledProvider = StateProvider<bool>((ref) => false);
 
 class ProfileScreen extends ConsumerWidget {
   const ProfileScreen({super.key});
@@ -13,20 +15,15 @@ class ProfileScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final userAsync = ref.watch(currentUserStreamProvider);
+    final autoPlayEnabled = ref.watch(autoPlayEnabledProvider);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Profile'),
+        title: const Text('Settings'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () => context.pop(),
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: () => _showLogoutDialog(context, ref),
-          ),
-        ],
       ),
       body: userAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
@@ -35,103 +32,164 @@ class ProfileScreen extends ConsumerWidget {
           if (user == null) {
             return const Center(child: Text('User not found'));
           }
-          return _buildProfileContent(context, ref, user);
-        },
-      ),
-    );
-  }
+          return SingleChildScrollView(
+            child: Column(
+              children: [
+                // User info card
+                Container(
+                  margin: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: AppColors.cardDark,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 30,
+                        backgroundColor: AppColors.primary,
+                        child: Text(
+                          user.displayName.isNotEmpty
+                              ? user.displayName[0].toUpperCase()
+                              : 'U',
+                          style: const TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.black,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              user.displayName,
+                              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              user.phoneNumber,
+                              style: TextStyle(
+                                color: AppColors.textSecondaryDark,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      _StatusIndicator(status: user.status),
+                    ],
+                  ),
+                ),
 
-  Widget _buildProfileContent(
-      BuildContext context, WidgetRef ref, UserModel user) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        children: [
-          // Avatar
-          CircleAvatar(
-            radius: 60,
-            backgroundColor: AppColors.primary,
-            backgroundImage:
-                user.photoUrl != null ? NetworkImage(user.photoUrl!) : null,
-            child: user.photoUrl == null
-                ? Text(
-                    user.displayName.isNotEmpty
-                        ? user.displayName[0].toUpperCase()
-                        : 'U',
-                    style: const TextStyle(
-                      fontSize: 40,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.black,
+                // Settings section
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Voice Settings',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              color: AppColors.textSecondaryDark,
+                            ),
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: AppColors.cardDark,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: SwitchListTile(
+                          title: const Text('Auto-play voice messages'),
+                          subtitle: Text(
+                            'Automatically play incoming voice messages',
+                            style: TextStyle(
+                              color: AppColors.textSecondaryDark,
+                              fontSize: 12,
+                            ),
+                          ),
+                          value: autoPlayEnabled,
+                          onChanged: (value) {
+                            ref.read(autoPlayEnabledProvider.notifier).state = value;
+                          },
+                          activeColor: AppColors.primary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 24),
+
+                // About section
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'About',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              color: AppColors.textSecondaryDark,
+                            ),
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: AppColors.cardDark,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: ListTile(
+                          leading: const Icon(Icons.info_outline),
+                          title: const Text('Voicely'),
+                          subtitle: const Text('Version 1.0.0'),
+                          onTap: () {
+                            showAboutDialog(
+                              context: context,
+                              applicationName: 'Voicely',
+                              applicationVersion: '1.0.0',
+                              applicationLegalese: 'Push-to-Talk Communication App',
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 32),
+
+                // Logout button
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () => _showLogoutDialog(context, ref),
+                      icon: const Icon(Icons.logout),
+                      label: const Text('Sign Out'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.error,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
                     ),
-                  )
-                : null,
-          ),
-          const SizedBox(height: 16),
-          // Name
-          Text(
-            user.displayName,
-            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.bold,
+                  ),
                 ),
-          ),
-          const SizedBox(height: 4),
-          // Phone number
-          Text(
-            user.phoneNumber,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: AppColors.textSecondaryDark,
-                ),
-          ),
-          const SizedBox(height: 8),
-          // Status
-          _StatusChip(status: user.status),
-          const SizedBox(height: 32),
-          // Profile options
-          _ProfileOption(
-            icon: Icons.person_outline,
-            title: 'Edit Profile',
-            onTap: () {
-              // TODO: Implement edit profile
-              context.showSnackBar('Edit profile coming soon');
-            },
-          ),
-          _ProfileOption(
-            icon: Icons.notifications_outlined,
-            title: 'Notifications',
-            onTap: () {
-              // TODO: Implement notifications settings
-              context.showSnackBar('Notification settings coming soon');
-            },
-          ),
-          _ProfileOption(
-            icon: Icons.dark_mode_outlined,
-            title: 'Appearance',
-            onTap: () {
-              // TODO: Implement appearance settings
-              context.showSnackBar('Appearance settings coming soon');
-            },
-          ),
-          _ProfileOption(
-            icon: Icons.help_outline,
-            title: 'Help & Support',
-            onTap: () {
-              // TODO: Implement help
-              context.showSnackBar('Help coming soon');
-            },
-          ),
-          _ProfileOption(
-            icon: Icons.info_outline,
-            title: 'About',
-            onTap: () {
-              showAboutDialog(
-                context: context,
-                applicationName: 'Voicely',
-                applicationVersion: '1.0.0',
-                applicationLegalese: 'Push-to-Talk Communication App',
-              );
-            },
-          ),
-        ],
+
+                const SizedBox(height: 32),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
@@ -163,85 +221,40 @@ class ProfileScreen extends ConsumerWidget {
   }
 }
 
-class _StatusChip extends StatelessWidget {
+class _StatusIndicator extends StatelessWidget {
   final UserStatus status;
 
-  const _StatusChip({required this.status});
+  const _StatusIndicator({required this.status});
 
   @override
   Widget build(BuildContext context) {
     Color color;
-    String text;
-
     switch (status) {
       case UserStatus.online:
         color = AppColors.online;
-        text = 'Online';
         break;
       case UserStatus.away:
         color = AppColors.away;
-        text = 'Away';
         break;
       case UserStatus.busy:
         color = AppColors.busy;
-        text = 'Busy';
         break;
       case UserStatus.offline:
         color = AppColors.offline;
-        text = 'Offline';
         break;
     }
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      width: 12,
+      height: 12,
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.2),
-        borderRadius: BorderRadius.circular(20),
+        color: color,
+        shape: BoxShape.circle,
+        border: Border.all(
+          color: AppColors.cardDark,
+          width: 2,
+        ),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              color: color,
-              shape: BoxShape.circle,
-            ),
-          ),
-          const SizedBox(width: 6),
-          Text(
-            text,
-            style: TextStyle(
-              color: color,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ProfileOption extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final VoidCallback onTap;
-
-  const _ProfileOption({
-    required this.icon,
-    required this.title,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      leading: Icon(icon),
-      title: Text(title),
-      trailing: const Icon(Icons.chevron_right),
-      onTap: onTap,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 8),
     );
   }
 }

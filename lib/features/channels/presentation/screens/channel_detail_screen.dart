@@ -1,13 +1,24 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:intl/intl.dart';
+import '../../../../core/services/background_audio_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
 import '../../../../di/providers.dart';
-import '../../../messaging/presentation/widgets/messages_list.dart';
-import '../../../ptt/domain/models/ptt_session_model.dart';
+import '../../../auth/presentation/screens/profile_screen.dart';
+import '../../../messaging/data/message_repository.dart';
+import '../../../messaging/domain/models/message_model.dart';
 import '../../../ptt/presentation/providers/ptt_providers.dart';
 import '../../../ptt/presentation/widgets/ptt_button.dart';
 import '../../domain/models/channel_model.dart';
+
+// Provider for messages stream
+final channelMessagesProvider = StreamProvider.family<List<MessageModel>, String>((ref, channelId) {
+  final messageRepo = ref.watch(messageRepositoryProvider);
+  return messageRepo.getChannelMessages(channelId);
+});
 
 class ChannelDetailScreen extends ConsumerStatefulWidget {
   final String channelId;
@@ -23,10 +34,105 @@ class ChannelDetailScreen extends ConsumerStatefulWidget {
 }
 
 class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
+  AudioPlayer? _audioPlayer;
+  String? _currentlyPlayingId;
+  String? _lastAutoPlayedMessageId;
+  StreamSubscription? _messageSubscription;
+  final BackgroundAudioService _backgroundService = BackgroundAudioService();
+  String? _channelName;
+
+  @override
+  void initState() {
+    super.initState();
+    _audioPlayer = AudioPlayer();
+    _backgroundService.initialize();
+    _setupAutoPlayListener();
+  }
+
+  @override
+  void dispose() {
+    _messageSubscription?.cancel();
+    _audioPlayer?.dispose();
+    super.dispose();
+  }
+
+  void _setupAutoPlayListener() {
+    final currentUser = ref.read(authStateProvider).value;
+    if (currentUser == null) return;
+
+    final messageRepo = ref.read(messageRepositoryProvider);
+    _messageSubscription = messageRepo.getChannelMessages(widget.channelId).listen((messages) {
+      if (messages.isEmpty) return;
+
+      final latestMessage = messages.first;
+
+      // Skip if it's our own message or already auto-played
+      if (latestMessage.senderId == currentUser.uid ||
+          latestMessage.id == _lastAutoPlayedMessageId) {
+        return;
+      }
+
+      // Check if auto-play is enabled
+      final autoPlayEnabled = ref.read(autoPlayEnabledProvider);
+      debugPrint('Auto-play check: enabled=$autoPlayEnabled, audioUrl=${latestMessage.audioUrl}, type=${latestMessage.type}');
+
+      if (autoPlayEnabled &&
+          latestMessage.audioUrl != null &&
+          latestMessage.type == MessageType.audio) {
+        debugPrint('Auto-playing message: ${latestMessage.id}');
+        _lastAutoPlayedMessageId = latestMessage.id;
+        // Use background service for auto-play (works when screen is locked)
+        _backgroundService.playAudio(
+          audioUrl: latestMessage.audioUrl!,
+          senderName: latestMessage.senderName,
+          channelName: _channelName ?? 'Channel',
+        );
+        if (mounted) {
+          setState(() => _currentlyPlayingId = latestMessage.id);
+        }
+      }
+    });
+  }
+
+  Future<void> _playAudio(MessageModel message) async {
+    if (message.audioUrl == null) return;
+
+    // If already playing this message, stop it
+    if (_currentlyPlayingId == message.id) {
+      await _audioPlayer?.stop();
+      setState(() => _currentlyPlayingId = null);
+      return;
+    }
+
+    try {
+      setState(() => _currentlyPlayingId = message.id);
+
+      await _audioPlayer?.stop();
+      await _audioPlayer?.setUrl(message.audioUrl!);
+      await _audioPlayer?.play();
+
+      // Wait for playback to complete
+      _audioPlayer?.playerStateStream.listen((state) {
+        if (state.processingState == ProcessingState.completed) {
+          if (mounted) {
+            setState(() => _currentlyPlayingId = null);
+          }
+        }
+      });
+    } catch (e) {
+      debugPrint('Error playing audio: $e');
+      if (mounted) {
+        setState(() => _currentlyPlayingId = null);
+        context.showSnackBar('Failed to play audio', isError: true);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final channelAsync = ref.watch(channelProvider(widget.channelId));
-    final membersAsync = ref.watch(channelMembersProvider(widget.channelId));
+    final messagesAsync = ref.watch(channelMessagesProvider(widget.channelId));
+    final autoPlayEnabled = ref.watch(autoPlayEnabledProvider);
 
     return channelAsync.when(
       loading: () => const Scaffold(
@@ -44,30 +150,216 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
           );
         }
 
+        // Save channel name for notifications
+        _channelName = channel.name;
+
         return Scaffold(
+          backgroundColor: AppColors.backgroundDark,
           appBar: AppBar(
             title: Text(channel.name),
+            centerTitle: true,
             actions: [
+              // Auto-play toggle
               IconButton(
-                icon: const Icon(Icons.info_outline),
-                onPressed: () => _showChannelInfo(context, channel),
+                icon: Icon(
+                  autoPlayEnabled ? Icons.volume_up : Icons.volume_off,
+                  color: autoPlayEnabled ? AppColors.primary : null,
+                ),
+                tooltip: autoPlayEnabled ? 'Auto-play ON' : 'Auto-play OFF',
+                onPressed: () {
+                  ref.read(autoPlayEnabledProvider.notifier).state = !autoPlayEnabled;
+                  context.showSnackBar(
+                    autoPlayEnabled ? 'Auto-play disabled' : 'Auto-play enabled',
+                  );
+                },
               ),
             ],
           ),
-          body: Column(
+          body: SafeArea(
+            child: Column(
+              children: [
+                // Playing indicator
+                if (_currentlyPlayingId != null)
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    color: AppColors.primary.withValues(alpha: 0.2),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.volume_up, color: AppColors.primary, size: 20),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Playing voice message...',
+                          style: TextStyle(color: AppColors.primary),
+                        ),
+                        const SizedBox(width: 8),
+                        GestureDetector(
+                          onTap: () async {
+                            await _audioPlayer?.stop();
+                            setState(() => _currentlyPlayingId = null);
+                          },
+                          child: Icon(Icons.stop_circle, color: AppColors.primary, size: 24),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                // Message history list
+                Expanded(
+                  child: messagesAsync.when(
+                    loading: () => const Center(child: CircularProgressIndicator()),
+                    error: (error, _) {
+                      // Check if it's an index building error
+                      final errorStr = error.toString();
+                      if (errorStr.contains('index') && errorStr.contains('building')) {
+                        return const Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              CircularProgressIndicator(),
+                              SizedBox(height: 16),
+                              Text(
+                                'Setting up...\nPlease wait a moment',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(color: AppColors.textSecondaryDark),
+                              ),
+                            ],
+                          ),
+                        );
+                      }
+                      return Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(Icons.error_outline, size: 48, color: AppColors.error),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Unable to load messages',
+                              style: TextStyle(color: AppColors.textSecondaryDark),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                    data: (messages) {
+                      if (messages.isEmpty) {
+                        return const Center(
+                          child: Text(
+                            'No messages yet\nPress and hold the button to record',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: AppColors.textSecondaryDark),
+                          ),
+                        );
+                      }
+                      return _buildMessageList(messages);
+                    },
+                  ),
+                ),
+
+                // PTT Button area
+                _buildPttArea(channel),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildMessageList(List<MessageModel> messages) {
+    return ListView.builder(
+      reverse: true,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      itemCount: messages.length,
+      itemBuilder: (context, index) {
+        final message = messages[index];
+        final currentUser = ref.read(authStateProvider).value;
+        final isMe = message.senderId == currentUser?.uid;
+        final isPlaying = _currentlyPlayingId == message.id;
+
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Row(
+            mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
             children: [
-              // Active speaker banner
-              _buildActiveSpeakerBanner(channel.id),
-              // Active speakers area
-              Expanded(
-                child: _buildActiveSpeakersArea(context, membersAsync),
+              Container(
+                constraints: BoxConstraints(
+                  maxWidth: MediaQuery.of(context).size.width * 0.75,
+                ),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: isMe ? AppColors.primary.withValues(alpha: 0.2) : AppColors.cardDark,
+                  borderRadius: BorderRadius.circular(16),
+                  border: isPlaying ? Border.all(color: AppColors.primary, width: 2) : null,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Play button
+                    GestureDetector(
+                      onTap: () => _playAudio(message),
+                      child: Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: isPlaying ? AppColors.primary : (isMe ? AppColors.primary : AppColors.surfaceDark),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          isPlaying ? Icons.stop : Icons.play_arrow,
+                          color: isPlaying || isMe ? Colors.black : Colors.white,
+                          size: 24,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    // Message info
+                    Flexible(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            isMe ? 'You' : message.senderName,
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                              color: isMe ? AppColors.primary : Colors.white,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.mic,
+                                size: 14,
+                                color: AppColors.textSecondaryDark,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                '${message.audioDuration ?? 0}s',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: AppColors.textSecondaryDark,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                _formatTime(message.timestamp),
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: AppColors.textSecondaryDark,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ),
-              // Messages area
-              Expanded(
-                child: _buildMessagesArea(context, channel.id),
-              ),
-              // PTT button area
-              _buildPttArea(context, channel),
             ],
           ),
         );
@@ -75,295 +367,59 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
     );
   }
 
-  Widget _buildActiveSpeakerBanner(String channelId) {
-    final speaker = ref.watch(currentSpeakerProvider(channelId));
-    final isCurrentUser = ref.watch(isCurrentUserSpeakingProvider(channelId));
+  String _formatTime(DateTime? timestamp) {
+    if (timestamp == null) return '';
+    final now = DateTime.now();
+    final diff = now.difference(timestamp);
 
-    if (speaker == null) {
-      return const SizedBox.shrink();
+    if (diff.inMinutes < 1) {
+      return 'Just now';
+    } else if (diff.inHours < 1) {
+      return '${diff.inMinutes}m ago';
+    } else if (diff.inDays < 1) {
+      return DateFormat('HH:mm').format(timestamp);
+    } else {
+      return DateFormat('MMM d, HH:mm').format(timestamp);
+    }
+  }
+
+  Widget _buildPttArea(ChannelModel channel) {
+    final session = ref.watch(pttSessionProvider(channel.id));
+
+    String statusText;
+    switch (session.state) {
+      case PttState.idle:
+        statusText = 'Hold to record';
+      case PttState.recording:
+        statusText = 'Recording...';
+      case PttState.uploading:
+        statusText = 'Sending...';
+      case PttState.error:
+        statusText = session.errorMessage ?? 'Error';
     }
 
     return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
       decoration: BoxDecoration(
-        color: isCurrentUser ? AppColors.pttActive : AppColors.pttReceiving,
-        boxShadow: [
-          BoxShadow(
-            color: (isCurrentUser ? AppColors.pttActive : AppColors.pttReceiving)
-                .withValues(alpha: 0.3),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        color: AppColors.surfaceDark,
+        border: Border(top: BorderSide(color: AppColors.cardDark)),
       ),
-      child: Row(
-        children: [
-          Icon(
-            isCurrentUser ? Icons.mic : Icons.volume_up,
-            color: Colors.white,
-            size: 20,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              isCurrentUser
-                  ? 'You are speaking'
-                  : '${speaker.name} is speaking',
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w600,
-                fontSize: 14,
-              ),
-            ),
-          ),
-          if (!isCurrentUser)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.2),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _buildSpeakingIndicator(),
-                  const SizedBox(width: 6),
-                  const Text(
-                    'LIVE',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSpeakingIndicator() {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: List.generate(3, (index) {
-        return TweenAnimationBuilder<double>(
-          tween: Tween(begin: 4, end: 10),
-          duration: Duration(milliseconds: 300 + (index * 100)),
-          builder: (context, value, child) {
-            return Container(
-              width: 3,
-              height: value,
-              margin: const EdgeInsets.symmetric(horizontal: 1),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            );
-          },
-        );
-      }),
-    );
-  }
-
-  Widget _buildActiveSpeakersArea(
-      BuildContext context, AsyncValue<List<ChannelMember>> membersAsync) {
-    return Container(
-      padding: const EdgeInsets.all(16),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            'Active Now',
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.bold,
-                ),
-          ),
-          const SizedBox(height: 12),
-          membersAsync.when(
-            loading: () => const Center(child: CircularProgressIndicator()),
-            error: (_, __) => const Text('Error loading members'),
-            data: (members) {
-              if (members.isEmpty) {
-                return const Text(
-                  'No active members',
-                  style: TextStyle(color: AppColors.textSecondaryDark),
-                );
-              }
-              return SizedBox(
-                height: 80,
-                child: ListView.builder(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: members.length,
-                  itemBuilder: (context, index) {
-                    final member = members[index];
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 16),
-                      child: Column(
-                        children: [
-                          Stack(
-                            children: [
-                              CircleAvatar(
-                                radius: 25,
-                                backgroundColor: AppColors.cardDark,
-                                child: Text(
-                                  member.userId[0].toUpperCase(),
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                              Positioned(
-                                right: 0,
-                                bottom: 0,
-                                child: Container(
-                                  width: 12,
-                                  height: 12,
-                                  decoration: BoxDecoration(
-                                    color: AppColors.online,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                      color: AppColors.backgroundDark,
-                                      width: 2,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            member.role.name.capitalize,
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMessagesArea(BuildContext context, String channelId) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.cardDark,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      child: MessagesList(channelId: channelId),
-    );
-  }
-
-  Widget _buildPttArea(BuildContext context, ChannelModel channel) {
-    final session = ref.watch(pttSessionProvider(channel.id));
-    final statusText = switch (session.state) {
-      PttSessionState.idle => 'Hold to talk (long-press to reset)',
-      PttSessionState.requestingFloor => 'Requesting floor...',
-      PttSessionState.transmitting => 'Release to stop',
-      PttSessionState.receiving => 'Listening...',
-      PttSessionState.error => session.errorMessage ?? 'Error occurred',
-    };
-
-    return Container(
-      padding: const EdgeInsets.all(24),
-      color: AppColors.surfaceDark,
-      child: Column(
-        children: [
-          // PTT button
-          PttButton(
-            channelId: channel.id,
-          ),
-          const SizedBox(height: 12),
+          // Status text
           Text(
             statusText,
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: AppColors.textSecondaryDark,
+                  color: session.isRecording ? Colors.red : AppColors.textSecondaryDark,
+                  fontWeight: session.isRecording ? FontWeight.bold : FontWeight.normal,
                 ),
-            textAlign: TextAlign.center,
           ),
+          const SizedBox(height: 16),
+          // PTT Button
+          PttButton(channelId: channel.id),
         ],
       ),
     );
   }
-
-  void _showChannelInfo(BuildContext context, ChannelModel channel) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: AppColors.surfaceDark,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (context) => Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: AppColors.textSecondaryDark,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
-            Text(
-              channel.name,
-              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-            ),
-            if (channel.description != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                channel.description!,
-                style: const TextStyle(color: AppColors.textSecondaryDark),
-              ),
-            ],
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                const Icon(Icons.people_outline, size: 20),
-                const SizedBox(width: 8),
-                Text('${channel.memberCount} members'),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Icon(
-                  channel.isPrivate ? Icons.lock_outline : Icons.public,
-                  size: 20,
-                ),
-                const SizedBox(width: 8),
-                Text(channel.isPrivate ? 'Private channel' : 'Public channel'),
-              ],
-            ),
-            if (channel.createdAt != null) ...[
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  const Icon(Icons.calendar_today_outlined, size: 20),
-                  const SizedBox(width: 8),
-                  Text('Created ${channel.createdAt!.formattedDate}'),
-                ],
-              ),
-            ],
-            const SizedBox(height: 24),
-          ],
-        ),
-      ),
-    );
-  }
-
 }
