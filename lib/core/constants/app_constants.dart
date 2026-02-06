@@ -5,7 +5,17 @@ class AppConstants {
   static const String appVersion = '1.0.0';
 
   // WebSocket signaling server
-  static const String signalingServerUrl = 'ws://your-server.com:8080';
+  // Development (Android emulator): ws://10.0.2.2:8080
+  // Development (iOS simulator): ws://localhost:8080
+  // Production: wss://voicely-signaling-<project>.run.app
+  static const String signalingServerUrl = String.fromEnvironment(
+    'SIGNALING_SERVER_URL',
+    defaultValue: 'ws://10.0.2.2:8080', // Android emulator localhost alias
+  );
+
+  // Live streaming settings
+  static const bool useLiveStreaming = true; // Set to false to use record-upload mode
+  static const Duration floorMaxDuration = Duration(minutes: 2);
 
   // Firestore collections
   static const String usersCollection = 'users';

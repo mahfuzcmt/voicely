@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:intl/intl.dart';
+import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/background_audio_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
@@ -10,7 +11,9 @@ import '../../../../di/providers.dart';
 import '../../../auth/presentation/screens/profile_screen.dart';
 import '../../../messaging/data/message_repository.dart';
 import '../../../messaging/domain/models/message_model.dart';
+import '../../../ptt/presentation/providers/live_ptt_providers.dart';
 import '../../../ptt/presentation/providers/ptt_providers.dart';
+import '../../../ptt/presentation/widgets/live_ptt_button.dart';
 import '../../../ptt/presentation/widgets/ptt_button.dart';
 import '../../domain/models/channel_model.dart';
 
@@ -384,6 +387,12 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
   }
 
   Widget _buildPttArea(ChannelModel channel) {
+    // Use live streaming mode if enabled
+    if (AppConstants.useLiveStreaming) {
+      return _buildLivePttArea(channel);
+    }
+
+    // Legacy record-upload mode
     final session = ref.watch(pttSessionProvider(channel.id));
 
     String statusText;
@@ -421,5 +430,68 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
         ],
       ),
     );
+  }
+
+  Widget _buildLivePttArea(ChannelModel channel) {
+    final session = ref.watch(livePttSessionProvider(channel.id));
+
+    String statusText;
+    switch (session.state) {
+      case LivePttState.idle:
+        statusText = 'Hold to talk';
+      case LivePttState.connecting:
+        statusText = 'Connecting...';
+      case LivePttState.requestingFloor:
+        statusText = 'Requesting...';
+      case LivePttState.broadcasting:
+        statusText = 'Broadcasting live';
+      case LivePttState.listening:
+        statusText = '${session.currentSpeakerName ?? "Someone"} is speaking';
+      case LivePttState.error:
+        statusText = session.errorMessage ?? 'Error';
+      case LivePttState.disconnected:
+        statusText = 'Disconnected - Tap to reconnect';
+    }
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceDark,
+        border: Border(top: BorderSide(color: AppColors.cardDark)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Status text
+          Text(
+            statusText,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: _getLiveStatusColor(session.state),
+                  fontWeight: session.isBroadcasting ? FontWeight.bold : FontWeight.normal,
+                ),
+          ),
+          const SizedBox(height: 16),
+          // Live PTT Button
+          LivePttButton(channelId: channel.id),
+        ],
+      ),
+    );
+  }
+
+  Color _getLiveStatusColor(LivePttState state) {
+    switch (state) {
+      case LivePttState.idle:
+        return AppColors.textSecondaryDark;
+      case LivePttState.connecting:
+      case LivePttState.requestingFloor:
+        return Colors.orange;
+      case LivePttState.broadcasting:
+        return Colors.red;
+      case LivePttState.listening:
+        return Colors.green;
+      case LivePttState.error:
+      case LivePttState.disconnected:
+        return AppColors.error;
+    }
   }
 }

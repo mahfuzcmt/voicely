@@ -23,6 +23,8 @@ final webrtcServiceProvider = Provider.autoDispose.family<WebRTCService, String>
   },
 );
 
+/// WebRTC service for peer-to-peer audio streaming
+/// Supports both legacy Firestore-based signaling and new WebSocket-based signaling
 class WebRTCService {
   final String channelId;
   final SignalingRepository _signalingRepository;
@@ -31,8 +33,11 @@ class WebRTCService {
   final Map<String, RTCPeerConnection> _peerConnections = {};
   final Map<String, MediaStream> _remoteStreams = {};
   final Map<String, List<RTCIceCandidate>> _pendingIceCandidates = {};
+  final List<RTCIceCandidate> _localIceCandidates = [];
+  Timer? _iceBatchTimer;
 
   String? _currentUserId;
+  bool _isLiveMode = false;
 
   final _remoteStreamController = StreamController<MediaStream>.broadcast();
   Stream<MediaStream> get remoteStreamAdded => _remoteStreamController.stream;
@@ -42,6 +47,9 @@ class WebRTCService {
   Stream<Map<String, RTCPeerConnectionState>> get connectionStates =>
       _connectionStateController.stream;
 
+  // Callback for ICE candidates (used in live mode)
+  void Function(RTCIceCandidate candidate, String? targetUserId)? onIceCandidate;
+
   WebRTCService({
     required this.channelId,
     required SignalingRepository signalingRepository,
@@ -49,6 +57,11 @@ class WebRTCService {
 
   MediaStream? get localStream => _localStream;
   Map<String, MediaStream> get remoteStreams => Map.unmodifiable(_remoteStreams);
+
+  /// Enable live streaming mode (uses WebSocket for signaling)
+  void setLiveMode(bool enabled) {
+    _isLiveMode = enabled;
+  }
 
   /// Initialize local audio stream (microphone access)
   Future<MediaStream?> initLocalStream() async {
@@ -239,7 +252,12 @@ class WebRTCService {
 
     // Handle ICE candidates
     pc.onIceCandidate = (RTCIceCandidate candidate) {
-      if (_currentUserId != null) {
+      if (_isLiveMode) {
+        // In live mode, batch ICE candidates and use callback
+        _localIceCandidates.add(candidate);
+        _scheduleIceBatch(peerId);
+      } else if (_currentUserId != null) {
+        // Legacy mode: send via Firestore
         _signalingRepository.sendIceCandidate(
           channelId: channelId,
           fromUserId: _currentUserId!,
@@ -286,6 +304,110 @@ class WebRTCService {
     _connectionStateController.add(states);
   }
 
+  /// Schedule batched ICE candidate sending (live mode)
+  void _scheduleIceBatch(String peerId) {
+    _iceBatchTimer?.cancel();
+    _iceBatchTimer = Timer(const Duration(milliseconds: 100), () {
+      _sendBatchedIceCandidates(peerId);
+    });
+  }
+
+  /// Send batched ICE candidates (live mode)
+  void _sendBatchedIceCandidates(String targetUserId) {
+    if (_localIceCandidates.isEmpty) return;
+    if (onIceCandidate == null) return;
+
+    // Send each candidate via callback
+    for (final candidate in _localIceCandidates) {
+      onIceCandidate?.call(candidate, targetUserId);
+    }
+
+    Logger.d('Sent ${_localIceCandidates.length} ICE candidates');
+    _localIceCandidates.clear();
+  }
+
+  /// Create offer for live streaming (returns SDP string)
+  Future<String?> createLiveOffer() async {
+    try {
+      final pc = await _createPeerConnection('live_broadcast');
+      _peerConnections['live_broadcast'] = pc;
+
+      if (_localStream != null) {
+        for (final track in _localStream!.getTracks()) {
+          await pc.addTrack(track, _localStream!);
+        }
+      }
+
+      final offer = await pc.createOffer({
+        'offerToReceiveAudio': false,
+        'offerToReceiveVideo': false,
+      });
+
+      await pc.setLocalDescription(offer);
+      Logger.d('Created live offer');
+      return offer.sdp;
+    } catch (e) {
+      Logger.e('Failed to create live offer', error: e);
+      return null;
+    }
+  }
+
+  /// Handle live offer (for listeners)
+  Future<String?> handleLiveOffer(String fromUserId, String sdp) async {
+    try {
+      final pc = await _createPeerConnection(fromUserId);
+      _peerConnections[fromUserId] = pc;
+
+      await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+      await _applyPendingIceCandidates(fromUserId);
+
+      final answer = await pc.createAnswer({
+        'offerToReceiveAudio': true,
+        'offerToReceiveVideo': false,
+      });
+
+      await pc.setLocalDescription(answer);
+      Logger.d('Created live answer for $fromUserId');
+      return answer.sdp;
+    } catch (e) {
+      Logger.e('Failed to handle live offer', error: e);
+      return null;
+    }
+  }
+
+  /// Handle live answer (for speaker)
+  Future<void> handleLiveAnswer(String fromUserId, String sdp) async {
+    try {
+      var pc = _peerConnections[fromUserId];
+
+      if (pc == null) {
+        pc = await _createPeerConnection(fromUserId);
+        _peerConnections[fromUserId] = pc;
+
+        if (_localStream != null) {
+          for (final track in _localStream!.getTracks()) {
+            await pc.addTrack(track, _localStream!);
+          }
+        }
+      }
+
+      await pc.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
+      await _applyPendingIceCandidates(fromUserId);
+      Logger.d('Handled live answer from $fromUserId');
+    } catch (e) {
+      Logger.e('Failed to handle live answer', error: e);
+    }
+  }
+
+  /// Close all peer connections (for live mode)
+  Future<void> closeAllConnections() async {
+    for (final peerId in _peerConnections.keys.toList()) {
+      await closePeerConnection(peerId);
+    }
+    _localIceCandidates.clear();
+    _iceBatchTimer?.cancel();
+  }
+
   /// Mute/unmute local audio
   void setMicrophoneEnabled(bool enabled) {
     if (_localStream != null) {
@@ -314,6 +436,9 @@ class WebRTCService {
   Future<void> dispose() async {
     Logger.d('Disposing WebRTC service');
 
+    _iceBatchTimer?.cancel();
+    _localIceCandidates.clear();
+
     // Close all peer connections
     for (final peerId in _peerConnections.keys.toList()) {
       await closePeerConnection(peerId);
@@ -328,8 +453,8 @@ class WebRTCService {
       _localStream = null;
     }
 
-    // Clean up signaling
-    if (_currentUserId != null) {
+    // Clean up signaling (only in legacy mode)
+    if (!_isLiveMode && _currentUserId != null) {
       await _signalingRepository.cleanupSignaling(
         channelId: channelId,
         userId: _currentUserId!,
