@@ -219,20 +219,24 @@ class LiveStreamingService {
   /// Start streaming to all listeners in the room
   Future<void> _startStreamingToListeners() async {
     if (_localStream == null) {
-      Logger.e('Cannot stream - no local stream');
+      debugPrint('LiveStream: Cannot stream - no local stream');
       return;
     }
 
-    Logger.d('Starting to stream to listeners');
+    debugPrint('LiveStream: Starting to stream to listeners');
+    debugPrint('LiveStream: Local stream tracks: ${_localStream!.getTracks().length}');
 
     // Create and send offer to all room members
     // The offer is broadcast via WebSocket, and each listener responds with an answer
     final offer = await _createOffer();
     if (offer != null) {
+      debugPrint('LiveStream: Sending offer, sdp length: ${offer.sdp?.length}');
       _wsService.sendOffer(
         roomId: channelId,
         sdp: offer.sdp!,
       );
+    } else {
+      debugPrint('LiveStream: Failed to create offer!');
     }
   }
 
@@ -269,28 +273,35 @@ class LiveStreamingService {
   /// Handle incoming offer (when someone starts speaking)
   Future<void> _handleIncomingOffer(String fromUserId, String sdp) async {
     // Skip our own offers
-    if (fromUserId == _wsService.userId) return;
+    if (fromUserId == _wsService.userId) {
+      debugPrint('LiveStream: Skipping own offer');
+      return;
+    }
 
-    Logger.d('Received offer from $fromUserId');
+    debugPrint('LiveStream: Received offer from $fromUserId, sdp length: ${sdp.length}');
 
     try {
       // Create peer connection for this speaker
+      debugPrint('LiveStream: Creating peer connection for $fromUserId');
       final pc = await _createPeerConnection(fromUserId);
       _peerConnections[fromUserId] = pc;
 
       // Set remote description
+      debugPrint('LiveStream: Setting remote description');
       await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
 
       // Apply any pending ICE candidates
       await _applyPendingIceCandidates(fromUserId);
 
       // Create answer
+      debugPrint('LiveStream: Creating answer');
       final answer = await pc.createAnswer({
         'offerToReceiveAudio': true,
         'offerToReceiveVideo': false,
       });
 
       await pc.setLocalDescription(answer);
+      debugPrint('LiveStream: Answer created, sending back');
 
       // Send answer back
       _wsService.sendAnswer(
@@ -307,13 +318,14 @@ class LiveStreamingService {
 
   /// Handle incoming answer (response to our offer)
   Future<void> _handleIncomingAnswer(String fromUserId, String sdp) async {
-    Logger.d('Received answer from $fromUserId');
+    debugPrint('LiveStream: Received answer from $fromUserId, sdp length: ${sdp.length}');
 
     try {
       // Get or create peer connection
       RTCPeerConnection? pc = _peerConnections[fromUserId];
 
       if (pc == null) {
+        debugPrint('LiveStream: Creating new peer connection for $fromUserId');
         // Create new connection for this listener
         pc = await _createPeerConnection(fromUserId);
         _peerConnections[fromUserId] = pc;
@@ -327,14 +339,15 @@ class LiveStreamingService {
       }
 
       // Set remote description
+      debugPrint('LiveStream: Setting remote description for answer');
       await pc.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
 
       // Apply pending ICE candidates
       await _applyPendingIceCandidates(fromUserId);
 
-      Logger.d('Handled answer from $fromUserId');
+      debugPrint('LiveStream: Answer handled successfully from $fromUserId');
     } catch (e) {
-      Logger.e('Failed to handle answer from $fromUserId', error: e);
+      debugPrint('LiveStream: Failed to handle answer: $e');
     }
   }
 
@@ -412,16 +425,27 @@ class LiveStreamingService {
 
     // Handle incoming tracks (for listeners)
     pc.onTrack = (RTCTrackEvent event) {
+      debugPrint('LiveStream: onTrack fired! track kind: ${event.track.kind}, streams: ${event.streams.length}');
       if (event.streams.isNotEmpty) {
         final remoteStream = event.streams.first;
         _remoteStreams[peerId] = remoteStream;
         _remoteStreamController.add(remoteStream);
-        Logger.d('Received remote stream from $peerId');
+        debugPrint('LiveStream: Remote stream received from $peerId, tracks: ${remoteStream.getTracks().length}');
+
+        // Enable audio tracks
+        for (final track in remoteStream.getAudioTracks()) {
+          track.enabled = true;
+          debugPrint('LiveStream: Audio track enabled: ${track.id}');
+        }
       }
     };
 
     pc.onIceConnectionState = (RTCIceConnectionState state) {
-      Logger.d('ICE connection state with $peerId: $state');
+      debugPrint('LiveStream: ICE state with $peerId: $state');
+    };
+
+    pc.onSignalingState = (RTCSignalingState state) {
+      debugPrint('LiveStream: Signaling state with $peerId: $state');
     };
 
     return pc;
