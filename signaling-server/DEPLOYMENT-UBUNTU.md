@@ -34,37 +34,33 @@ sudo apt install -y nginx
 
 ## Server Setup
 
-### 1. Create Application User
+### 1. Create Application Directory
 ```bash
-sudo useradd -m -s /bin/bash voicely
 sudo mkdir -p /opt/voicely
-sudo chown voicely:voicely /opt/voicely
 ```
 
 ### 2. Clone/Upload the Code
 ```bash
 # Option A: Clone from GitHub
-sudo -u voicely git clone https://github.com/mahfuzcmt/voicely.git /opt/voicely/app
+sudo git clone https://github.com/mahfuzcmt/voicely.git /opt/voicely/app
 
 # Option B: Upload via SCP (from your local machine)
-# scp -r signaling-server/ user@your-server:/opt/voicely/signaling-server
+# scp -r signaling-server/ user@your-server:/opt/voicely/app/signaling-server
 ```
 
 ### 3. Navigate to Signaling Server
 ```bash
 cd /opt/voicely/app/signaling-server
-# OR if uploaded separately:
-# cd /opt/voicely/signaling-server
 ```
 
 ### 4. Install Dependencies
 ```bash
-sudo -u voicely npm install
+sudo npm install
 ```
 
 ### 5. Build TypeScript
 ```bash
-sudo -u voicely npm run build
+sudo npm run build
 ```
 
 ---
@@ -80,23 +76,22 @@ sudo -u voicely npm run build
 ### 2. Upload Service Account Key
 ```bash
 # From your local machine
-scp path/to/service-account.json user@your-server:/opt/voicely/signaling-server/
+scp path/to/service-account.json user@your-server:/opt/voicely/app/signaling-server/
 
 # Set permissions
-sudo chown voicely:voicely /opt/voicely/signaling-server/service-account.json
-sudo chmod 600 /opt/voicely/signaling-server/service-account.json
+sudo chmod 600 /opt/voicely/app/signaling-server/service-account.json
 ```
 
 ### 3. Create Environment File
 ```bash
-sudo -u voicely nano /opt/voicely/signaling-server/.env
+sudo nano /opt/voicely/app/signaling-server/.env
 ```
 
 Add the following:
 ```env
 NODE_ENV=production
 PORT=8080
-GOOGLE_APPLICATION_CREDENTIALS=/opt/voicely/signaling-server/service-account.json
+GOOGLE_APPLICATION_CREDENTIALS=/opt/voicely/app/signaling-server/service-account.json
 ALLOWED_ORIGINS=*
 WS_HEARTBEAT_INTERVAL=30000
 WS_CONNECTION_TIMEOUT=60000
@@ -108,7 +103,7 @@ WS_CONNECTION_TIMEOUT=60000
 
 ### 1. Create PM2 Ecosystem File
 ```bash
-sudo -u voicely nano /opt/voicely/signaling-server/ecosystem.config.js
+sudo nano /opt/voicely/app/signaling-server/ecosystem.config.js
 ```
 
 Add:
@@ -117,7 +112,7 @@ module.exports = {
   apps: [{
     name: 'voicely-signaling',
     script: 'dist/index.js',
-    cwd: '/opt/voicely/signaling-server',
+    cwd: '/opt/voicely/app/signaling-server',
     instances: 1,
     autorestart: true,
     watch: false,
@@ -126,31 +121,31 @@ module.exports = {
       NODE_ENV: 'production',
       PORT: 8080
     },
-    env_file: '/opt/voicely/signaling-server/.env'
+    env_file: '/opt/voicely/app/signaling-server/.env'
   }]
 };
 ```
 
 ### 2. Start the Server
 ```bash
-cd /opt/voicely/signaling-server
-sudo -u voicely pm2 start ecosystem.config.js
+cd /opt/voicely/app/signaling-server
+sudo pm2 start ecosystem.config.js
 ```
 
 ### 3. Save PM2 Configuration
 ```bash
-sudo -u voicely pm2 save
+sudo pm2 save
 ```
 
 ### 4. Setup PM2 Startup Script
 ```bash
-pm2 startup systemd -u voicely --hp /home/voicely
+pm2 startup systemd
 # Run the command it outputs
 ```
 
 ### 5. Verify Server is Running
 ```bash
-sudo -u voicely pm2 status
+sudo pm2 status
 curl http://localhost:8080/health
 ```
 
@@ -163,7 +158,7 @@ curl http://localhost:8080/health
 sudo nano /etc/nginx/sites-available/voicely-signaling
 ```
 
-Add (replace `your-domain.com` with your actual domain):
+Add (replace `voicely.emeetlive.com` with your actual domain):
 ```nginx
 upstream voicely_signaling {
     server 127.0.0.1:8080;
@@ -171,7 +166,7 @@ upstream voicely_signaling {
 
 server {
     listen 80;
-    server_name your-domain.com;
+    server_name voicely.emeetlive.com;
 
     location / {
         return 301 https://$server_name$request_uri;
@@ -180,11 +175,11 @@ server {
 
 server {
     listen 443 ssl http2;
-    server_name your-domain.com;
+    server_name voicely.emeetlive.com;
 
     # SSL certificates (will be added by Certbot)
-    ssl_certificate /etc/letsencrypt/live/your-domain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/voicely.emeetlive.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/voicely.emeetlive.com/privkey.pem;
 
     # SSL settings
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -222,7 +217,7 @@ sudo systemctl reload nginx
 sudo apt install -y certbot python3-certbot-nginx
 
 # Get SSL certificate
-sudo certbot --nginx -d your-domain.com
+sudo certbot --nginx -d voicely.emeetlive.com
 
 # Auto-renewal is enabled by default
 sudo systemctl status certbot.timer
@@ -251,13 +246,13 @@ Edit `lib/core/constants/app_constants.dart`:
 ```dart
 static const String signalingServerUrl = String.fromEnvironment(
   'SIGNALING_SERVER_URL',
-  defaultValue: 'wss://your-domain.com',
+  defaultValue: 'wss://voicely.emeetlive.com',
 );
 ```
 
 ### Option 2: Build with Environment Variable
 ```bash
-flutter build apk --dart-define=SIGNALING_SERVER_URL=wss://your-domain.com
+flutter build apk --dart-define=SIGNALING_SERVER_URL=wss://voicely.emeetlive.com
 ```
 
 ---
@@ -267,37 +262,37 @@ flutter build apk --dart-define=SIGNALING_SERVER_URL=wss://your-domain.com
 ### View Logs
 ```bash
 # PM2 logs
-sudo -u voicely pm2 logs voicely-signaling
+sudo pm2 logs voicely-signaling
 
 # Real-time logs
-sudo -u voicely pm2 logs voicely-signaling --lines 100
+sudo pm2 logs voicely-signaling --lines 100
 ```
 
 ### Monitor Status
 ```bash
-sudo -u voicely pm2 monit
+sudo pm2 monit
 ```
 
 ### Restart Server
 ```bash
-sudo -u voicely pm2 restart voicely-signaling
+sudo pm2 restart voicely-signaling
 ```
 
 ### Update Application
 ```bash
-cd /opt/voicely/signaling-server
-sudo -u voicely git pull
-sudo -u voicely npm install
-sudo -u voicely npm run build
-sudo -u voicely pm2 restart voicely-signaling
+cd /opt/voicely/app/signaling-server
+sudo git pull
+sudo npm install
+sudo npm run build
+sudo pm2 restart voicely-signaling
 ```
 
 ---
 
 ## Health Check Endpoints
 
-- **Health**: `https://your-domain.com/health`
-- **Stats**: `https://your-domain.com/stats`
+- **Health**: `https://voicely.emeetlive.com/health`
+- **Stats**: `https://voicely.emeetlive.com/stats`
 
 ---
 
@@ -305,13 +300,13 @@ sudo -u voicely pm2 restart voicely-signaling
 
 ### Check if server is running
 ```bash
-sudo -u voicely pm2 status
+sudo pm2 status
 curl http://localhost:8080/health
 ```
 
 ### Check logs for errors
 ```bash
-sudo -u voicely pm2 logs voicely-signaling --err --lines 50
+sudo pm2 logs voicely-signaling --err --lines 50
 ```
 
 ### Check Nginx errors
@@ -325,7 +320,7 @@ sudo tail -f /var/log/nginx/error.log
 sudo apt install -y websocat
 
 # Test connection
-websocat wss://your-domain.com
+websocat wss://voicely.emeetlive.com
 ```
 
 ### Common Issues
@@ -341,20 +336,20 @@ websocat wss://your-domain.com
 
 ```bash
 # Start server
-sudo -u voicely pm2 start ecosystem.config.js
+sudo pm2 start ecosystem.config.js
 
 # Stop server
-sudo -u voicely pm2 stop voicely-signaling
+sudo pm2 stop voicely-signaling
 
 # Restart server
-sudo -u voicely pm2 restart voicely-signaling
+sudo pm2 restart voicely-signaling
 
 # View logs
-sudo -u voicely pm2 logs
+sudo pm2 logs
 
 # Check status
-sudo -u voicely pm2 status
+sudo pm2 status
 
 # Monitor resources
-sudo -u voicely pm2 monit
+sudo pm2 monit
 ```
