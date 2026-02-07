@@ -471,20 +471,21 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
           // Large PTT button
           LivePttButton(
             channelId: channel.id,
-            size: 220,
+            size: 280,
           ),
 
-          const SizedBox(height: 24),
+          const SizedBox(height: 16),
 
-          // Status text
-          Text(
-            _getLiveStatusText(session),
-            style: TextStyle(
-              fontSize: 16,
-              color: _getLiveStatusColor(session.state),
-              fontWeight: session.isBroadcasting ? FontWeight.bold : FontWeight.normal,
+          // Status text - only show when not idle
+          if (session.state != LivePttState.idle)
+            Text(
+              _getLiveStatusText(session),
+              style: TextStyle(
+                fontSize: 16,
+                color: _getLiveStatusColor(session.state),
+                fontWeight: session.isBroadcasting ? FontWeight.bold : FontWeight.normal,
+              ),
             ),
-          ),
         ],
       ),
     );
@@ -506,20 +507,21 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
           // Large PTT button
           PttButton(
             channelId: channel.id,
-            size: 220,
+            size: 280,
           ),
 
-          const SizedBox(height: 24),
+          const SizedBox(height: 16),
 
-          // Status text
-          Text(
-            _getLegacyStatusText(session),
-            style: TextStyle(
-              fontSize: 16,
-              color: session.isRecording ? Colors.red : Colors.grey,
-              fontWeight: session.isRecording ? FontWeight.bold : FontWeight.normal,
+          // Status text - only show when not idle
+          if (session.state != PttState.idle)
+            Text(
+              _getLegacyStatusText(session),
+              style: TextStyle(
+                fontSize: 16,
+                color: session.isRecording ? Colors.red : Colors.grey,
+                fontWeight: session.isRecording ? FontWeight.bold : FontWeight.normal,
+              ),
             ),
-          ),
         ],
       ),
     );
