@@ -52,9 +52,10 @@ export interface AuthResult {
  * Verify Firebase ID token and extract user info
  */
 export async function verifyToken(token: string): Promise<AuthResult> {
-  // Development mode or skip auth: accept any token and extract user info from it
+  // Skip auth mode: accept any token and extract user info from it (works even with credentials set)
+  // Development mode without credentials: also skip auth
   // Token format for dev: "dev_userId_displayName" or actual Firebase token
-  if ((isDevelopment || skipAuth) && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  if (skipAuth || (isDevelopment && !process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
     // Check if it's a dev token format
     if (token.startsWith('dev_')) {
       const parts = token.split('_');
@@ -115,7 +116,7 @@ export async function handleAuth(
   ws: AuthenticatedWebSocket,
   token: string
 ): Promise<boolean> {
-  console.log(`Auth attempt - token length: ${token?.length || 0}, isDev: ${isDevelopment}, hasCredentials: ${!!process.env.GOOGLE_APPLICATION_CREDENTIALS}`);
+  console.log(`Auth attempt - token length: ${token?.length || 0}, isDev: ${isDevelopment}, skipAuth: ${skipAuth}, hasCredentials: ${!!process.env.GOOGLE_APPLICATION_CREDENTIALS}`);
 
   const result = await verifyToken(token);
   console.log(`Auth result: success=${result.success}, userId=${result.userId}, error=${result.error}`);
