@@ -56,21 +56,31 @@ class LiveStreamingService {
   bool _isBroadcasting = false;
   String? _currentSpeakerId;
 
+  // Debug state
+  int _audioTracksReceived = 0;
+  bool _onTrackFired = false;
+  String? _iceState;
+
   // Controllers
   final _stateController = StreamController<LiveStreamingState>.broadcast();
   final _remoteStreamController = StreamController<MediaStream>.broadcast();
   final _speakerController = StreamController<({String? id, String? name})>.broadcast();
+  final _debugController = StreamController<({int tracks, bool onTrack, String? ice})>.broadcast();
 
   // Streams
   Stream<LiveStreamingState> get stateStream => _stateController.stream;
   Stream<MediaStream> get remoteStreamAdded => _remoteStreamController.stream;
   Stream<({String? id, String? name})> get currentSpeaker => _speakerController.stream;
+  Stream<({int tracks, bool onTrack, String? ice})> get debugState => _debugController.stream;
 
   // Getters
   LiveStreamingState get state => _state;
   bool get isBroadcasting => _isBroadcasting;
   MediaStream? get localStream => _localStream;
   Map<String, MediaStream> get remoteStreams => Map.unmodifiable(_remoteStreams);
+  int get audioTracksReceived => _audioTracksReceived;
+  bool get onTrackFired => _onTrackFired;
+  String? get iceState => _iceState;
 
   LiveStreamingService({
     required this.channelId,
@@ -491,62 +501,112 @@ class LiveStreamingService {
       debugPrint('LiveStream: Track enabled: ${event.track.enabled}, muted: ${event.track.muted}');
       debugPrint('LiveStream: Streams count: ${event.streams.length}');
 
-      if (event.track.kind == 'audio') {
-        // CRITICAL: Use native Android audio control for reliable speakerphone
-        debugPrint('LiveStream: Enabling native speakerphone on track receive...');
-        try {
-          // Native Android AudioManager (most reliable)
-          final nativeSpeaker = await NativeAudioService.setSpeakerOn(true);
-          debugPrint('LiveStream: Native speakerphone result: $nativeSpeaker');
+      // Update debug state
+      _onTrackFired = true;
+      _debugController.add((tracks: _audioTracksReceived, onTrack: true, ice: _iceState));
 
-          // Also try flutter_webrtc Helper as backup
+      if (event.track.kind == 'audio') {
+        // Update debug track count
+        _audioTracksReceived++;
+        _debugController.add((tracks: _audioTracksReceived, onTrack: true, ice: _iceState));
+
+        // CRITICAL: Configure audio BEFORE anything else
+        debugPrint('LiveStream: ========== AUDIO TRACK RECEIVED ==========');
+
+        // Step 1: Native Android audio setup
+        try {
+          debugPrint('LiveStream: Step 1 - Native audio mode setup');
+          await NativeAudioService.setAudioModeForVoiceChat();
+          await NativeAudioService.setSpeakerOn(true);
+          debugPrint('LiveStream: Native audio configured');
+
+          // Play a test tone to verify speaker is working
+          debugPrint('LiveStream: Playing test tone to verify audio output...');
+          await NativeAudioService.playTestTone();
+        } catch (e) {
+          debugPrint('LiveStream: Native audio error: $e');
+        }
+
+        // Step 2: Flutter WebRTC speaker setup
+        try {
+          debugPrint('LiveStream: Step 2 - Flutter speakerphone');
           await Helper.setSpeakerphoneOn(true);
           debugPrint('LiveStream: Flutter speakerphone enabled');
         } catch (e) {
-          debugPrint('LiveStream: Failed to enable speakerphone: $e');
+          debugPrint('LiveStream: Flutter speaker error: $e');
         }
 
-        // Ensure track is enabled
+        // Step 3: Enable the track
         event.track.enabled = true;
-        debugPrint('LiveStream: Audio track enabled');
+        debugPrint('LiveStream: Step 3 - Track enabled: ${event.track.enabled}');
+
+        // Step 4: Set volume on the track (CRITICAL for Android)
+        try {
+          debugPrint('LiveStream: Step 4 - Setting track volume');
+          await Helper.setVolume(1.0, event.track);
+          debugPrint('LiveStream: Track volume set to 1.0');
+        } catch (e) {
+          debugPrint('LiveStream: Failed to set track volume: $e');
+        }
 
         if (event.streams.isNotEmpty) {
           final remoteStream = event.streams.first;
           _remoteStreams[peerId] = remoteStream;
 
-          // CRITICAL: Create an RTCVideoRenderer to actually play the audio
-          // Even for audio-only streams, the renderer is needed to consume the stream
-          debugPrint('LiveStream: Creating audio renderer for $peerId');
-          await _createAudioRenderer(peerId, remoteStream);
-
-          _remoteStreamController.add(remoteStream);
-          debugPrint('LiveStream: Remote stream added from $peerId');
-          debugPrint('LiveStream: Stream tracks: ${remoteStream.getTracks().length}');
-          debugPrint('LiveStream: Audio tracks: ${remoteStream.getAudioTracks().length}');
-
-          // Double-check all audio tracks are enabled and not muted
+          // Step 5: Enable all audio tracks in the stream
+          debugPrint('LiveStream: Step 5 - Enabling all audio tracks');
           for (final track in remoteStream.getAudioTracks()) {
             track.enabled = true;
-            debugPrint('LiveStream: Enabled audio track: ${track.id}, muted: ${track.muted}');
+            try {
+              await Helper.setVolume(1.0, track);
+              debugPrint('LiveStream: Track ${track.id} enabled, volume set');
+            } catch (e) {
+              debugPrint('LiveStream: Volume set failed for ${track.id}: $e');
+            }
           }
 
-          // Final native speakerphone check with delay
-          await Future.delayed(const Duration(milliseconds: 100));
-          await NativeAudioService.setSpeakerOn(true);
-          debugPrint('LiveStream: Final native speakerphone enable after setup');
+          // Step 6: Create renderer to consume the stream
+          debugPrint('LiveStream: Step 6 - Creating audio renderer');
+          await _createAudioRenderer(peerId, remoteStream);
 
-          // Log final audio state
+          // Step 7: Notify listeners
+          _remoteStreamController.add(remoteStream);
+          debugPrint('LiveStream: Step 7 - Stream notification sent');
+
+          // Step 8: Final audio check with delays
+          debugPrint('LiveStream: Step 8 - Final audio verification');
+          for (int i = 0; i < 5; i++) {
+            await Future.delayed(const Duration(milliseconds: 200));
+            try {
+              await NativeAudioService.setSpeakerOn(true);
+              await Helper.setSpeakerphoneOn(true);
+            } catch (e) {
+              // ignore
+            }
+          }
+
+          // Log final state
           final audioState = await NativeAudioService.getAudioState();
-          debugPrint('LiveStream: Final audio state: $audioState');
+          debugPrint('LiveStream: ========== FINAL STATE ==========');
+          debugPrint('LiveStream: Audio state: $audioState');
+          debugPrint('LiveStream: Audio tracks: ${remoteStream.getAudioTracks().length}');
+          for (final track in remoteStream.getAudioTracks()) {
+            debugPrint('LiveStream: Track ${track.id}: enabled=${track.enabled}, muted=${track.muted}');
+          }
+          debugPrint('LiveStream: ================================');
         } else {
-          // No stream, but we have a track - create a stream
-          debugPrint('LiveStream: No stream in event, track only');
+          debugPrint('LiveStream: WARNING - No stream in event, only track');
         }
       }
     };
 
     pc.onIceConnectionState = (RTCIceConnectionState state) {
       debugPrint('LiveStream: *** ICE Connection State: $state ***');
+
+      // Update debug state
+      _iceState = state.toString().split('.').last;
+      _debugController.add((tracks: _audioTracksReceived, onTrack: _onTrackFired, ice: _iceState));
+
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
         debugPrint('LiveStream: ICE CONNECTED! Audio should flow now.');
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
@@ -752,5 +812,6 @@ class LiveStreamingService {
     await _stateController.close();
     await _remoteStreamController.close();
     await _speakerController.close();
+    await _debugController.close();
   }
 }

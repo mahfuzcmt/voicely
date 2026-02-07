@@ -43,16 +43,18 @@ class AudioSessionManager {
     }
   }
 
-  /// Configure audio session for receiving audio
+  /// Configure audio session for receiving WebRTC audio
+  /// Note: WebRTC requires playAndRecord mode for proper audio routing
   Future<void> configureForReceiving() async {
     try {
       _session ??= await AudioSession.instance;
 
       await _session!.configure(AudioSessionConfiguration(
-        avAudioSessionCategory: AVAudioSessionCategory.playback,
+        // WebRTC needs playAndRecord for proper audio routing on mobile
+        avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
         avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.defaultToSpeaker |
-            AVAudioSessionCategoryOptions.mixWithOthers,
-        avAudioSessionMode: AVAudioSessionMode.spokenAudio,
+            AVAudioSessionCategoryOptions.allowBluetooth,
+        avAudioSessionMode: AVAudioSessionMode.voiceChat,
         avAudioSessionRouteSharingPolicy:
             AVAudioSessionRouteSharingPolicy.defaultPolicy,
         avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
@@ -61,12 +63,11 @@ class AudioSessionManager {
           flags: AndroidAudioFlags.none,
           usage: AndroidAudioUsage.voiceCommunication,
         ),
-        androidAudioFocusGainType:
-            AndroidAudioFocusGainType.gainTransientMayDuck,
+        androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
         androidWillPauseWhenDucked: false,
       ));
 
-      Logger.d('Audio session configured for receiving');
+      Logger.d('Audio session configured for receiving (playAndRecord mode)');
     } catch (e) {
       Logger.e('Failed to configure audio session for receiving', error: e);
     }

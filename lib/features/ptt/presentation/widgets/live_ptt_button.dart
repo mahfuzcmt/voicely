@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../core/services/native_audio_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
 import '../providers/live_ptt_providers.dart';
@@ -329,40 +330,48 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
   }
 
   Widget _buildSpeakerIndicator(LivePttSessionState session) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.green.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.green.withValues(alpha: 0.3)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(
-            Icons.volume_up,
-            size: 16,
-            color: Colors.green,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.green.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.green.withValues(alpha: 0.3)),
           ),
-          const SizedBox(width: 6),
-          Text(
-            session.currentSpeakerName ?? 'Someone',
-            style: const TextStyle(
-              fontSize: 12,
-              color: Colors.green,
-              fontWeight: FontWeight.w500,
-            ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.volume_up,
+                size: 16,
+                color: Colors.green,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                session.currentSpeakerName ?? 'Someone',
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Colors.green,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(width: 4),
+              const Text(
+                'is speaking',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.green,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(width: 4),
-          const Text(
-            'is speaking',
-            style: TextStyle(
-              fontSize: 12,
-              color: Colors.green,
-            ),
-          ),
-        ],
-      ),
+        ),
+        // DEBUG: Show audio state
+        const SizedBox(height: 8),
+        _AudioDebugInfo(channelId: widget.channelId),
+      ],
     );
   }
 
@@ -504,6 +513,140 @@ class _AudioBarState extends State<_AudioBar>
           ),
         );
       },
+    );
+  }
+}
+
+/// Debug widget to show audio state on screen
+class _AudioDebugInfo extends ConsumerStatefulWidget {
+  final String channelId;
+
+  const _AudioDebugInfo({required this.channelId});
+
+  @override
+  ConsumerState<_AudioDebugInfo> createState() => _AudioDebugInfoState();
+}
+
+class _AudioDebugInfoState extends ConsumerState<_AudioDebugInfo> {
+  Map<String, dynamic>? _audioState;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAudioState();
+  }
+
+  Future<void> _loadAudioState() async {
+    final state = await NativeAudioService.getAudioState();
+    if (mounted) {
+      setState(() {
+        _audioState = state;
+        _loading = false;
+      });
+    }
+    // Refresh every second while visible
+    Future.delayed(const Duration(seconds: 1), () {
+      if (mounted) _loadAudioState();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Get WebRTC state from provider
+    final session = ref.watch(livePttSessionProvider(widget.channelId));
+
+    if (_loading || _audioState == null) {
+      return const Text(
+        'Loading audio state...',
+        style: TextStyle(fontSize: 10, color: Colors.grey),
+      );
+    }
+
+    final mode = _audioState!['modeString'] ?? 'Unknown';
+    final speaker = _audioState!['isSpeakerphoneOn'] == true ? 'ON' : 'OFF';
+    final voiceVol = _audioState!['voiceCallVolume'] ?? '?';
+    final voiceMax = _audioState!['voiceCallMaxVolume'] ?? '?';
+    final musicVol = _audioState!['musicVolume'] ?? '?';
+    final musicMax = _audioState!['musicMaxVolume'] ?? '?';
+
+    // WebRTC state
+    final tracksReceived = session.audioTracksReceived;
+    final onTrackFired = session.onTrackFired;
+    final iceState = session.iceState ?? 'unknown';
+
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.black87,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'DEBUG - AUDIO & WEBRTC',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+              color: Colors.yellow[400],
+            ),
+          ),
+          const SizedBox(height: 4),
+          // Android Audio State
+          Text(
+            'Mode: $mode',
+            style: TextStyle(
+              fontSize: 10,
+              color: mode == 'IN_COMMUNICATION' ? Colors.green : Colors.red,
+            ),
+          ),
+          Text(
+            'Speaker: $speaker',
+            style: TextStyle(
+              fontSize: 10,
+              color: speaker == 'ON' ? Colors.green : Colors.red,
+            ),
+          ),
+          Text(
+            'Voice Vol: $voiceVol/$voiceMax',
+            style: TextStyle(
+              fontSize: 10,
+              color: voiceVol == voiceMax ? Colors.green : Colors.orange,
+            ),
+          ),
+          Text(
+            'Music Vol: $musicVol/$musicMax',
+            style: TextStyle(
+              fontSize: 10,
+              color: musicVol == musicMax ? Colors.green : Colors.orange,
+            ),
+          ),
+          const Divider(color: Colors.grey, height: 8),
+          // WebRTC State
+          Text(
+            'onTrack: ${onTrackFired ? "YES" : "NO"}',
+            style: TextStyle(
+              fontSize: 10,
+              color: onTrackFired ? Colors.green : Colors.red,
+            ),
+          ),
+          Text(
+            'Audio Tracks: $tracksReceived',
+            style: TextStyle(
+              fontSize: 10,
+              color: tracksReceived > 0 ? Colors.green : Colors.red,
+            ),
+          ),
+          Text(
+            'ICE: $iceState',
+            style: TextStyle(
+              fontSize: 10,
+              color: iceState.contains('Connected') ? Colors.green : Colors.orange,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

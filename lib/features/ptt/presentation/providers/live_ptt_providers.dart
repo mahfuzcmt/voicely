@@ -43,6 +43,10 @@ class LivePttSessionState {
   final String? currentSpeakerName;
   final DateTime? floorExpiresAt;
   final WSConnectionState connectionState;
+  // Debug info
+  final int audioTracksReceived;
+  final bool onTrackFired;
+  final String? iceState;
 
   const LivePttSessionState({
     this.state = LivePttState.disconnected,
@@ -52,6 +56,9 @@ class LivePttSessionState {
     this.currentSpeakerName,
     this.floorExpiresAt,
     this.connectionState = WSConnectionState.disconnected,
+    this.audioTracksReceived = 0,
+    this.onTrackFired = false,
+    this.iceState,
   });
 
   LivePttSessionState copyWith({
@@ -62,6 +69,9 @@ class LivePttSessionState {
     String? currentSpeakerName,
     DateTime? floorExpiresAt,
     WSConnectionState? connectionState,
+    int? audioTracksReceived,
+    bool? onTrackFired,
+    String? iceState,
   }) {
     return LivePttSessionState(
       state: state ?? this.state,
@@ -71,6 +81,9 @@ class LivePttSessionState {
       currentSpeakerName: currentSpeakerName,
       floorExpiresAt: floorExpiresAt,
       connectionState: connectionState ?? this.connectionState,
+      audioTracksReceived: audioTracksReceived ?? this.audioTracksReceived,
+      onTrackFired: onTrackFired ?? this.onTrackFired,
+      iceState: iceState ?? this.iceState,
     );
   }
 
@@ -146,6 +159,7 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
   StreamSubscription? _speakerSubscription;
   StreamSubscription? _floorSubscription;
   StreamSubscription? _remoteStreamSubscription;
+  StreamSubscription? _debugSubscription;
   Timer? _broadcastTimer;
 
   LivePttSessionNotifier({
@@ -227,11 +241,50 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
     _remoteStreamSubscription = _streamingService.remoteStreamAdded.listen((stream) async {
       await _playRemoteStream(stream);
     });
+
+    // Listen for debug state updates
+    _debugSubscription = _streamingService.debugState.listen((debug) {
+      state = state.copyWith(
+        audioTracksReceived: debug.tracks,
+        onTrackFired: debug.onTrack,
+        iceState: debug.ice,
+      );
+    });
   }
 
   /// Auto-connect to WebSocket server
   Future<void> _autoConnect() async {
     debugPrint('LivePTT: _autoConnect called for channel $channelId');
+
+    // CRITICAL: Request microphone permission first
+    // WebRTC on Android needs this even for receiving audio
+    debugPrint('LivePTT: Requesting microphone permission...');
+    try {
+      // This will trigger permission dialog if not granted
+      final stream = await navigator.mediaDevices.getUserMedia({
+        'audio': true,
+        'video': false,
+      });
+      // Immediately stop the stream, we just needed the permission
+      for (final track in stream.getTracks()) {
+        await track.stop();
+      }
+      await stream.dispose();
+      debugPrint('LivePTT: Microphone permission granted');
+    } catch (e) {
+      debugPrint('LivePTT: Microphone permission error: $e');
+      // Don't block - permission might already be granted but getUserMedia failed
+      // for another reason. Continue and let the actual streaming handle errors.
+    }
+
+    // Configure native audio for voice chat right away
+    debugPrint('LivePTT: Pre-configuring native audio...');
+    try {
+      await NativeAudioService.setAudioModeForVoiceChat();
+      debugPrint('LivePTT: Native audio pre-configured');
+    } catch (e) {
+      debugPrint('LivePTT: Native audio pre-config error: $e');
+    }
 
     if (_wsService.isConnected) {
       debugPrint('LivePTT: Already connected, joining room');
@@ -461,6 +514,7 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
     _speakerSubscription?.cancel();
     _floorSubscription?.cancel();
     _remoteStreamSubscription?.cancel();
+    _debugSubscription?.cancel();
     _stopBroadcastTimer();
 
     // Leave room on dispose

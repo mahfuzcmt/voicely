@@ -36,29 +36,39 @@ class AppConstants {
   static const Duration floorRequestTimeout = Duration(seconds: 5);
 
   // WebRTC ICE servers configuration
+  // Using Metered.ca TURN servers for cross-network connectivity
   static const List<Map<String, dynamic>> iceServers = [
+    // Metered STUN server
+    {
+      'urls': 'stun:stun.relay.metered.ca:80',
+    },
+    // Google STUN servers (backup)
     {
       'urls': [
         'stun:stun.l.google.com:19302',
         'stun:stun1.l.google.com:19302',
-        'stun:stun2.l.google.com:19302',
       ],
     },
-    // Free TURN server for testing (from Open Relay Project)
+    // Metered.ca TURN servers (your credentials)
     {
-      'urls': 'turn:openrelay.metered.ca:80',
-      'username': 'openrelayproject',
-      'credential': 'openrelayproject',
+      'urls': 'turn:global.relay.metered.ca:80',
+      'username': 'd4f8bc1c56cbc8570a8b91f2',
+      'credential': 'IrsdghbIHKwC+WDs',
     },
     {
-      'urls': 'turn:openrelay.metered.ca:443',
-      'username': 'openrelayproject',
-      'credential': 'openrelayproject',
+      'urls': 'turn:global.relay.metered.ca:80?transport=tcp',
+      'username': 'd4f8bc1c56cbc8570a8b91f2',
+      'credential': 'IrsdghbIHKwC+WDs',
     },
     {
-      'urls': 'turn:openrelay.metered.ca:443?transport=tcp',
-      'username': 'openrelayproject',
-      'credential': 'openrelayproject',
+      'urls': 'turn:global.relay.metered.ca:443',
+      'username': 'd4f8bc1c56cbc8570a8b91f2',
+      'credential': 'IrsdghbIHKwC+WDs',
+    },
+    {
+      'urls': 'turns:global.relay.metered.ca:443?transport=tcp',
+      'username': 'd4f8bc1c56cbc8570a8b91f2',
+      'credential': 'IrsdghbIHKwC+WDs',
     },
   ];
 
