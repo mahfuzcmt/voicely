@@ -411,9 +411,9 @@ class AppConfig {
       case Environment.development:
         return 'ws://localhost:3000';
       case Environment.staging:
-        return 'wss://staging-signal.voicely.com';
+        return 'wss://staging.voicelyent.xyz';
       case Environment.production:
-        return 'wss://signal.voicely.com';
+        return 'wss://voicelyent.xyz';
     }
   }
 

@@ -158,7 +158,7 @@ curl http://localhost:8080/health
 sudo nano /etc/nginx/sites-available/voicely-signaling
 ```
 
-Add (replace `voicely.emeetlive.com` with your actual domain):
+Add (replace `voicelyent.xyz` with your actual domain):
 ```nginx
 upstream voicely_signaling {
     server 127.0.0.1:8080;
@@ -166,7 +166,7 @@ upstream voicely_signaling {
 
 server {
     listen 80;
-    server_name voicely.emeetlive.com;
+    server_name voicelyent.xyz;
 
     location / {
         return 301 https://$server_name$request_uri;
@@ -175,11 +175,11 @@ server {
 
 server {
     listen 443 ssl http2;
-    server_name voicely.emeetlive.com;
+    server_name voicelyent.xyz;
 
     # SSL certificates (will be added by Certbot)
-    ssl_certificate /etc/letsencrypt/live/voicely.emeetlive.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/voicely.emeetlive.com/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/voicelyent.xyz/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/voicelyent.xyz/privkey.pem;
 
     # SSL settings
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -217,7 +217,7 @@ sudo systemctl reload nginx
 sudo apt install -y certbot python3-certbot-nginx
 
 # Get SSL certificate
-sudo certbot --nginx -d voicely.emeetlive.com
+sudo certbot --nginx -d voicelyent.xyz
 
 # Auto-renewal is enabled by default
 sudo systemctl status certbot.timer
@@ -246,13 +246,13 @@ Edit `lib/core/constants/app_constants.dart`:
 ```dart
 static const String signalingServerUrl = String.fromEnvironment(
   'SIGNALING_SERVER_URL',
-  defaultValue: 'wss://voicely.emeetlive.com',
+  defaultValue: 'wss://voicelyent.xyz',
 );
 ```
 
 ### Option 2: Build with Environment Variable
 ```bash
-flutter build apk --dart-define=SIGNALING_SERVER_URL=wss://voicely.emeetlive.com
+flutter build apk --dart-define=SIGNALING_SERVER_URL=wss://voicelyent.xyz
 ```
 
 ---
@@ -291,8 +291,8 @@ sudo pm2 restart voicely-signaling
 
 ## Health Check Endpoints
 
-- **Health**: `https://voicely.emeetlive.com/health`
-- **Stats**: `https://voicely.emeetlive.com/stats`
+- **Health**: `https://voicelyent.xyz/health`
+- **Stats**: `https://voicelyent.xyz/stats`
 
 ---
 
@@ -320,7 +320,7 @@ sudo tail -f /var/log/nginx/error.log
 sudo apt install -y websocat
 
 # Test connection
-websocat wss://voicely.emeetlive.com
+websocat wss://voicelyent.xyz
 ```
 
 ### Common Issues
