@@ -7,6 +7,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../../../di/providers.dart';
 import '../../data/live_streaming_service.dart';
 import '../../data/websocket_signaling_service.dart';
+import 'audio_providers.dart';
 
 /// Live PTT state
 enum LivePttState {
@@ -222,8 +223,8 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
     });
 
     // Listen for remote streams (audio playback)
-    _remoteStreamSubscription = _streamingService.remoteStreamAdded.listen((stream) {
-      _playRemoteStream(stream);
+    _remoteStreamSubscription = _streamingService.remoteStreamAdded.listen((stream) async {
+      await _playRemoteStream(stream);
     });
   }
 
@@ -349,10 +350,29 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
   }
 
   /// Play remote audio stream
-  void _playRemoteStream(MediaStream stream) {
-    // The stream is already handled by flutter_webrtc
-    // Audio will play automatically when the track is received
-    debugPrint('Playing remote stream: ${stream.id}');
+  Future<void> _playRemoteStream(MediaStream stream) async {
+    debugPrint('LivePTT: Playing remote stream: ${stream.id}');
+
+    // Configure audio session for receiving
+    final audioManager = _ref.read(audioSessionProvider);
+    await audioManager.configureForReceiving();
+    await audioManager.activate();
+
+    // Enable speakerphone for WebRTC audio
+    try {
+      await Helper.setSpeakerphoneOn(true);
+      debugPrint('LivePTT: Speakerphone enabled');
+    } catch (e) {
+      debugPrint('LivePTT: Failed to enable speakerphone: $e');
+    }
+
+    // Ensure all audio tracks are enabled
+    for (final track in stream.getAudioTracks()) {
+      track.enabled = true;
+      debugPrint('LivePTT: Audio track ${track.id} enabled');
+    }
+
+    debugPrint('LivePTT: Remote audio should now be playing');
   }
 
   /// Start timer to track broadcast duration
