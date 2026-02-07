@@ -519,10 +519,6 @@ class LiveStreamingService {
           await NativeAudioService.setAudioModeForVoiceChat();
           await NativeAudioService.setSpeakerOn(true);
           debugPrint('LiveStream: Native audio configured');
-
-          // Play a test tone to verify speaker is working
-          debugPrint('LiveStream: Playing test tone to verify audio output...');
-          await NativeAudioService.playTestTone();
         } catch (e) {
           debugPrint('LiveStream: Native audio error: $e');
         }

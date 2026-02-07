@@ -1,9 +1,11 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../../../../core/services/background_ptt_service.dart';
 import '../../../../core/services/native_audio_service.dart';
 import '../../../../di/providers.dart';
 import '../../data/live_streaming_service.dart';
@@ -148,11 +150,13 @@ final livePttSessionProvider = StateNotifierProvider.autoDispose
 });
 
 /// Live PTT session state notifier
-class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
+class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
+    with WidgetsBindingObserver {
   final Ref _ref;
   final String channelId;
   final WebSocketSignalingService _wsService;
   final LiveStreamingService _streamingService;
+  final BackgroundPttService _backgroundService = BackgroundPttService();
 
   StreamSubscription? _connectionSubscription;
   StreamSubscription? _streamingStateSubscription;
@@ -161,6 +165,8 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
   StreamSubscription? _remoteStreamSubscription;
   StreamSubscription? _debugSubscription;
   Timer? _broadcastTimer;
+  bool _wakelockEnabled = false;
+  bool _backgroundServiceStarted = false;
 
   LivePttSessionNotifier({
     required Ref ref,
@@ -176,6 +182,65 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
         )) {
     _setupListeners();
     _autoConnect();
+    // Register for app lifecycle events
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    debugPrint('LivePTT: App lifecycle changed to: $state');
+    switch (state) {
+      case AppLifecycleState.paused:
+      case AppLifecycleState.inactive:
+        // App went to background - ensure background service is running
+        _onAppBackground();
+        break;
+      case AppLifecycleState.resumed:
+        // App came to foreground - reconfigure audio
+        _onAppForeground();
+        break;
+      case AppLifecycleState.detached:
+      case AppLifecycleState.hidden:
+        // App being closed
+        break;
+    }
+  }
+
+  /// Handle app going to background
+  Future<void> _onAppBackground() async {
+    debugPrint('LivePTT: App going to background, ensuring services are running');
+
+    // Make sure background service is running
+    await _startBackgroundService();
+
+    // Keep wakelock enabled
+    await _enableWakelock();
+
+    // Update notification
+    if (state.currentSpeakerName != null) {
+      _backgroundService.notifySpeaking(state.currentSpeakerName!, 'Channel');
+    } else {
+      _backgroundService.notifyIdle();
+    }
+  }
+
+  /// Handle app coming to foreground
+  Future<void> _onAppForeground() async {
+    debugPrint('LivePTT: App coming to foreground, reconfiguring audio');
+
+    // Reconfigure audio for playback
+    try {
+      await NativeAudioService.setAudioModeForVoiceChat();
+      await NativeAudioService.setSpeakerOn(true);
+    } catch (e) {
+      debugPrint('LivePTT: Failed to reconfigure audio: $e');
+    }
+
+    // Reconnect WebSocket if disconnected
+    if (!_wsService.isConnected) {
+      debugPrint('LivePTT: WebSocket disconnected, reconnecting...');
+      await reconnect();
+    }
   }
 
   /// Setup listeners for state changes
@@ -215,6 +280,13 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
         currentSpeakerId: speaker.id,
         currentSpeakerName: speaker.name,
       );
+
+      // Update background notification when speaker changes
+      if (speaker.name != null && speaker.name!.isNotEmpty) {
+        _backgroundService.notifySpeaking(speaker.name!, 'Channel');
+      } else {
+        _backgroundService.notifyIdle();
+      }
     });
 
     // Listen to floor state from WebSocket
@@ -255,6 +327,12 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
   /// Auto-connect to WebSocket server
   Future<void> _autoConnect() async {
     debugPrint('LivePTT: _autoConnect called for channel $channelId');
+
+    // Start background service for keeping app alive when in background
+    await _startBackgroundService();
+
+    // Enable wakelock to prevent device from sleeping during PTT session
+    await _enableWakelock();
 
     // CRITICAL: Request microphone permission first
     // WebRTC on Android needs this even for receiving audio
@@ -407,6 +485,14 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
   Future<void> _playRemoteStream(MediaStream stream) async {
     debugPrint('LivePTT: Playing remote stream: ${stream.id}');
 
+    // Ensure wakelock is enabled during playback
+    await _enableWakelock();
+
+    // Update background notification to show we're receiving audio
+    if (state.currentSpeakerName != null) {
+      _backgroundService.notifySpeaking(state.currentSpeakerName!, 'Channel');
+    }
+
     // CRITICAL: Use native Android AudioManager for reliable audio routing
     debugPrint('LivePTT: Configuring native audio for playback...');
     try {
@@ -507,8 +593,68 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
     }
   }
 
+  /// Start background service for keeping connections alive
+  Future<void> _startBackgroundService() async {
+    if (_backgroundServiceStarted) return;
+
+    try {
+      debugPrint('LivePTT: Starting background service...');
+      await _backgroundService.initialize();
+      await _backgroundService.start();
+      _backgroundServiceStarted = true;
+      debugPrint('LivePTT: Background service started');
+    } catch (e) {
+      debugPrint('LivePTT: Failed to start background service: $e');
+    }
+  }
+
+  /// Stop background service
+  Future<void> _stopBackgroundService() async {
+    if (!_backgroundServiceStarted) return;
+
+    try {
+      debugPrint('LivePTT: Stopping background service...');
+      await _backgroundService.stop();
+      _backgroundServiceStarted = false;
+      debugPrint('LivePTT: Background service stopped');
+    } catch (e) {
+      debugPrint('LivePTT: Failed to stop background service: $e');
+    }
+  }
+
+  /// Enable wakelock to keep CPU awake during PTT session
+  Future<void> _enableWakelock() async {
+    if (_wakelockEnabled) return;
+
+    try {
+      debugPrint('LivePTT: Enabling wakelock...');
+      await WakelockPlus.enable();
+      _wakelockEnabled = true;
+      debugPrint('LivePTT: Wakelock enabled');
+    } catch (e) {
+      debugPrint('LivePTT: Failed to enable wakelock: $e');
+    }
+  }
+
+  /// Disable wakelock
+  Future<void> _disableWakelock() async {
+    if (!_wakelockEnabled) return;
+
+    try {
+      debugPrint('LivePTT: Disabling wakelock...');
+      await WakelockPlus.disable();
+      _wakelockEnabled = false;
+      debugPrint('LivePTT: Wakelock disabled');
+    } catch (e) {
+      debugPrint('LivePTT: Failed to disable wakelock: $e');
+    }
+  }
+
   @override
   void dispose() {
+    // Remove lifecycle observer
+    WidgetsBinding.instance.removeObserver(this);
+
     _connectionSubscription?.cancel();
     _streamingStateSubscription?.cancel();
     _speakerSubscription?.cancel();
@@ -516,6 +662,10 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
     _remoteStreamSubscription?.cancel();
     _debugSubscription?.cancel();
     _stopBroadcastTimer();
+
+    // Stop background service and disable wakelock
+    _stopBackgroundService();
+    _disableWakelock();
 
     // Leave room on dispose
     if (_wsService.isConnected) {

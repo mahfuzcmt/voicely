@@ -36,11 +36,11 @@ class AppConstants {
   static const Duration floorRequestTimeout = Duration(seconds: 5);
 
   // WebRTC ICE servers configuration
-  // Using Metered.ca TURN servers for cross-network connectivity
+  // Using your own coturn server on voicelyent.xyz
   static const List<Map<String, dynamic>> iceServers = [
-    // Metered STUN server
+    // Your STUN server
     {
-      'urls': 'stun:stun.relay.metered.ca:80',
+      'urls': 'stun:103.159.37.167:3478',
     },
     // Google STUN servers (backup)
     {
@@ -49,26 +49,17 @@ class AppConstants {
         'stun:stun1.l.google.com:19302',
       ],
     },
-    // Metered.ca TURN servers (your credentials)
+    // Your TURN server (UDP)
     {
-      'urls': 'turn:global.relay.metered.ca:80',
-      'username': 'd4f8bc1c56cbc8570a8b91f2',
-      'credential': 'IrsdghbIHKwC+WDs',
+      'urls': 'turn:103.159.37.167:3478',
+      'username': 'voicely',
+      'credential': 'VoicelyTurn2024Secure',
     },
+    // Your TURN server (TCP)
     {
-      'urls': 'turn:global.relay.metered.ca:80?transport=tcp',
-      'username': 'd4f8bc1c56cbc8570a8b91f2',
-      'credential': 'IrsdghbIHKwC+WDs',
-    },
-    {
-      'urls': 'turn:global.relay.metered.ca:443',
-      'username': 'd4f8bc1c56cbc8570a8b91f2',
-      'credential': 'IrsdghbIHKwC+WDs',
-    },
-    {
-      'urls': 'turns:global.relay.metered.ca:443?transport=tcp',
-      'username': 'd4f8bc1c56cbc8570a8b91f2',
-      'credential': 'IrsdghbIHKwC+WDs',
+      'urls': 'turn:103.159.37.167:3478?transport=tcp',
+      'username': 'voicely',
+      'credential': 'VoicelyTurn2024Secure',
     },
   ];
 
