@@ -7,10 +7,10 @@ class AppConstants {
   // WebSocket signaling server
   // Development (Android emulator): ws://10.0.2.2:8080
   // Development (iOS simulator): ws://localhost:8080
-  // Production: wss://voicely-signaling-<project>.run.app
+  // Production: wss://voicelyent.xyz
   static const String signalingServerUrl = String.fromEnvironment(
     'SIGNALING_SERVER_URL',
-    defaultValue: 'ws://10.0.2.2:8080', // Android emulator localhost alias
+    defaultValue: 'wss://voicelyent.xyz',
   );
 
   // Live streaming settings
