@@ -199,6 +199,12 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
   }
 
   Widget _buildTopBar(ChannelModel channel, bool autoPlayEnabled) {
+    final session = AppConstants.useLiveStreaming
+        ? ref.watch(livePttSessionProvider(channel.id))
+        : null;
+
+    final isActive = session?.isBroadcasting == true || session?.isListening == true;
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       child: Row(
@@ -208,6 +214,44 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
             icon: const Icon(Icons.arrow_back_ios, color: AppColors.primary),
             onPressed: () => Navigator.pop(context),
           ),
+          const Spacer(),
+          // Timer when broadcasting or speaker name when listening
+          if (isActive && session != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: session.isBroadcasting
+                    ? Colors.red.withValues(alpha: 0.1)
+                    : Colors.green.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: session.isBroadcasting ? Colors.red : Colors.green,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    session.isBroadcasting
+                        ? _formatDuration(session.broadcastDuration)
+                        : (session.currentSpeakerName?.isNotEmpty == true)
+                            ? session.currentSpeakerName!
+                            : 'Listening...',
+                    style: TextStyle(
+                      color: session.isBroadcasting ? Colors.red : Colors.green,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           const Spacer(),
           // Archive/Message history button
           IconButton(
@@ -410,83 +454,10 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
   }
 
   Widget _buildLiveFullPagePtt(ChannelModel channel) {
-    final session = ref.watch(livePttSessionProvider(channel.id));
-
     return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          // Speaker indicator - shown when someone is speaking OR when you are broadcasting
-          if (session.isListening || session.isBroadcasting)
-            Container(
-              margin: const EdgeInsets.only(bottom: 24),
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-              decoration: BoxDecoration(
-                color: session.isBroadcasting
-                    ? Colors.red.withValues(alpha: 0.1)
-                    : Colors.green.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(
-                  color: session.isBroadcasting ? Colors.red : Colors.green,
-                  width: 2,
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // Animated speaker icon
-                  _AnimatedSpeakerIcon(
-                    isActive: true,
-                    color: session.isBroadcasting ? Colors.red : Colors.green,
-                  ),
-                  const SizedBox(width: 12),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        session.isBroadcasting
-                            ? 'You are speaking'
-                            : '${session.currentSpeakerName ?? "Someone"} is speaking',
-                        style: TextStyle(
-                          color: session.isBroadcasting ? Colors.red : Colors.green,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        ),
-                      ),
-                      if (session.isBroadcasting && session.broadcastStartTime != null)
-                        Text(
-                          _formatDuration(session.broadcastDuration),
-                          style: TextStyle(
-                            color: Colors.red.withValues(alpha: 0.7),
-                            fontSize: 12,
-                          ),
-                        ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-
-          // Large PTT button
-          LivePttButton(
-            channelId: channel.id,
-            size: 280,
-          ),
-
-          const SizedBox(height: 16),
-
-          // Status text - only show when not idle
-          if (session.state != LivePttState.idle)
-            Text(
-              _getLiveStatusText(session),
-              style: TextStyle(
-                fontSize: 16,
-                color: _getLiveStatusColor(session.state),
-                fontWeight: session.isBroadcasting ? FontWeight.bold : FontWeight.normal,
-              ),
-            ),
-        ],
+      child: LivePttButton(
+        channelId: channel.id,
+        size: 320,
       ),
     );
   }
@@ -498,31 +469,10 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
   }
 
   Widget _buildLegacyFullPagePtt(ChannelModel channel) {
-    final session = ref.watch(pttSessionProvider(channel.id));
-
     return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          // Large PTT button
-          PttButton(
-            channelId: channel.id,
-            size: 280,
-          ),
-
-          const SizedBox(height: 16),
-
-          // Status text - only show when not idle
-          if (session.state != PttState.idle)
-            Text(
-              _getLegacyStatusText(session),
-              style: TextStyle(
-                fontSize: 16,
-                color: session.isRecording ? Colors.red : Colors.grey,
-                fontWeight: session.isRecording ? FontWeight.bold : FontWeight.normal,
-              ),
-            ),
-        ],
+      child: PttButton(
+        channelId: channel.id,
+        size: 320,
       ),
     );
   }

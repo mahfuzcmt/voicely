@@ -36,26 +36,37 @@ class AppConstants {
   static const Duration floorRequestTimeout = Duration(seconds: 5);
 
   // WebRTC ICE servers configuration
-  // Using your own coturn server on voicelyent.xyz
+  // Using multiple TURN servers for reliability
   static const List<Map<String, dynamic>> iceServers = [
-    // Your STUN server
-    {
-      'urls': 'stun:103.159.37.167:3478',
-    },
-    // Google STUN servers (backup)
+    // Google STUN servers (most reliable)
     {
       'urls': [
         'stun:stun.l.google.com:19302',
         'stun:stun1.l.google.com:19302',
+        'stun:stun2.l.google.com:19302',
+        'stun:stun3.l.google.com:19302',
       ],
     },
-    // Your TURN server (UDP)
+    // OpenRelay public TURN server (free, for testing)
+    {
+      'urls': [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp',
+      ],
+      'username': 'openrelayproject',
+      'credential': 'openrelayproject',
+    },
+    // Twilio STUN (backup)
+    {
+      'urls': 'stun:global.stun.twilio.com:3478',
+    },
+    // Your TURN server (if running coturn)
     {
       'urls': 'turn:103.159.37.167:3478',
       'username': 'voicely',
       'credential': 'VoicelyTurn2024Secure',
     },
-    // Your TURN server (TCP)
     {
       'urls': 'turn:103.159.37.167:3478?transport=tcp',
       'username': 'voicely',

@@ -57,7 +57,9 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
         context.showSnackBar('Reconnecting...');
       } else if (session.isListening) {
         // Someone else is speaking
-        final speakerName = session.currentSpeakerName ?? 'Someone';
+        final speakerName = (session.currentSpeakerName?.isNotEmpty == true)
+            ? session.currentSpeakerName!
+            : 'Another user';
         context.showSnackBar('$speakerName is speaking');
       }
       return;
@@ -350,7 +352,9 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
               ),
               const SizedBox(width: 6),
               Text(
-                session.currentSpeakerName ?? 'Someone',
+                (session.currentSpeakerName?.isNotEmpty == true)
+                    ? session.currentSpeakerName!
+                    : 'User',
                 style: const TextStyle(
                   fontSize: 12,
                   color: Colors.green,

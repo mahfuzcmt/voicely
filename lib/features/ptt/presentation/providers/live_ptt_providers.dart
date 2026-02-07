@@ -276,6 +276,7 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
 
     // Listen to current speaker changes
     _speakerSubscription = _streamingService.currentSpeaker.listen((speaker) {
+      debugPrint('LivePTT: Speaker changed - id: ${speaker.id}, name: ${speaker.name}');
       state = state.copyWith(
         currentSpeakerId: speaker.id,
         currentSpeakerName: speaker.name,
@@ -295,12 +296,14 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
 
       final floor = event.state;
       if (floor != null) {
+        debugPrint('LivePTT: Floor state update - speakerId: ${floor.speakerId}, speakerName: ${floor.speakerName}');
         state = state.copyWith(
           currentSpeakerId: floor.speakerId,
           currentSpeakerName: floor.speakerName,
           floorExpiresAt: floor.expiresAt,
         );
       } else {
+        debugPrint('LivePTT: Floor released - clearing speaker info');
         state = state.copyWith(
           currentSpeakerId: null,
           currentSpeakerName: null,

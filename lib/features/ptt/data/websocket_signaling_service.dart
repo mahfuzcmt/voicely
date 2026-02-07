@@ -621,11 +621,21 @@ class WebSocketSignalingService {
 
       case WSMessageType.floorTaken:
         final speaker = json['speaker'] as Map<String, dynamic>;
+        final speakerId = speaker['userId'] as String;
+        // Handle empty or missing displayName - use a fallback
+        String speakerName = speaker['displayName'] as String? ?? '';
+        if (speakerName.isEmpty) {
+          // Try to get name from other fields or use a generated name
+          speakerName = speaker['name'] as String? ??
+                        speaker['email']?.toString().split('@').first ??
+                        'User ${speakerId.substring(0, 6)}';
+        }
+        debugPrint('WS: floorTaken - speakerId: $speakerId, speakerName: $speakerName');
         _floorStateController.add((
           roomId: roomId,
           state: WSFloorState(
-            speakerId: speaker['userId'] as String,
-            speakerName: speaker['displayName'] as String,
+            speakerId: speakerId,
+            speakerName: speakerName,
             speakerPhotoUrl: speaker['photoUrl'] as String?,
             startedAt: DateTime.fromMillisecondsSinceEpoch(speaker['joinedAt'] as int),
             expiresAt: DateTime.fromMillisecondsSinceEpoch(json['expiresAt'] as int),
