@@ -328,14 +328,25 @@ class LiveStreamingService {
     debugPrint('LiveStream: Received answer from $fromUserId, sdp length: ${sdp.length}');
 
     try {
-      // Get or create peer connection
-      RTCPeerConnection? pc = _peerConnections[fromUserId];
+      // If we're broadcasting, use the 'broadcast' peer connection
+      // Otherwise look for a connection with fromUserId
+      RTCPeerConnection? pc;
+      String pcKey;
+
+      if (_isBroadcasting && _peerConnections.containsKey('broadcast')) {
+        pc = _peerConnections['broadcast'];
+        pcKey = 'broadcast';
+        debugPrint('LiveStream: Using broadcast peer connection for answer');
+      } else {
+        pc = _peerConnections[fromUserId];
+        pcKey = fromUserId;
+      }
 
       if (pc == null) {
-        debugPrint('LiveStream: Creating new peer connection for $fromUserId');
-        // Create new connection for this listener
+        debugPrint('LiveStream: No peer connection found for answer, creating new one');
         pc = await _createPeerConnection(fromUserId);
         _peerConnections[fromUserId] = pc;
+        pcKey = fromUserId;
 
         // Add local stream for broadcasting
         if (_localStream != null) {
@@ -346,11 +357,15 @@ class LiveStreamingService {
       }
 
       // Set remote description
-      debugPrint('LiveStream: Setting remote description for answer');
+      debugPrint('LiveStream: Setting remote description for answer on $pcKey');
       await pc.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
 
-      // Apply pending ICE candidates
+      // Apply pending ICE candidates (use fromUserId since that's how they're keyed)
       await _applyPendingIceCandidates(fromUserId);
+      // Also try broadcast key
+      if (pcKey == 'broadcast') {
+        await _applyPendingIceCandidates('broadcast');
+      }
 
       debugPrint('LiveStream: Answer handled successfully from $fromUserId');
     } catch (e) {
@@ -367,18 +382,25 @@ class LiveStreamingService {
   ) async {
     final iceCandidate = RTCIceCandidate(candidate, sdpMid, sdpMLineIndex);
 
-    final pc = _peerConnections[fromUserId];
+    // If broadcasting, use 'broadcast' peer connection, otherwise use fromUserId
+    RTCPeerConnection? pc = _peerConnections[fromUserId];
+    if (pc == null && _isBroadcasting) {
+      pc = _peerConnections['broadcast'];
+    }
+
     final remoteDesc = await pc?.getRemoteDescription();
 
     if (pc == null || remoteDesc == null) {
       // Queue candidate until we have the connection ready
       _pendingIceCandidates.putIfAbsent(fromUserId, () => []);
       _pendingIceCandidates[fromUserId]!.add(iceCandidate);
+      debugPrint('LiveStream: Queued ICE candidate from $fromUserId (pc=${pc != null}, remoteDesc=${remoteDesc != null})');
       return;
     }
 
     try {
       await pc.addCandidate(iceCandidate);
+      debugPrint('LiveStream: Added ICE candidate from $fromUserId');
     } catch (e) {
       Logger.e('Failed to add ICE candidate', error: e);
     }
