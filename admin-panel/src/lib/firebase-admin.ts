@@ -8,11 +8,22 @@ let adminAuth: Auth;
 
 function initializeFirebaseAdmin() {
   if (getApps().length === 0) {
-    // For development, use default credentials or environment variables
-    // In production, you should use a service account key
-    app = initializeApp({
-      projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-    });
+    // Check for service account credentials
+    const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+
+    if (serviceAccountJson) {
+      // Parse the service account JSON from environment variable
+      const serviceAccount = JSON.parse(serviceAccountJson);
+      app = initializeApp({
+        credential: cert(serviceAccount),
+        projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+      });
+    } else {
+      // Fallback for development - requires GOOGLE_APPLICATION_CREDENTIALS env var
+      app = initializeApp({
+        projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+      });
+    }
   } else {
     app = getApps()[0];
   }

@@ -5,13 +5,20 @@ import {
   getDocs,
   getDoc,
   doc,
-  addDoc,
+  setDoc,
   serverTimestamp,
   orderBy,
   query,
   where,
 } from 'firebase/firestore';
-import { getAdminFromToken, hashPassword } from '@/lib/auth';
+import { getAdminFromToken } from '@/lib/auth';
+import { getAdminAuth } from '@/lib/firebase-admin';
+
+// Convert phone number to email format (same as mobile app)
+function phoneToEmail(phoneNumber: string): string {
+  const cleanPhone = phoneNumber.replace(/[^\d+]/g, '');
+  return `${cleanPhone}@voicely.app`;
+}
 
 // GET all users (optionally filter by channel)
 export async function GET(request: NextRequest) {
@@ -86,7 +93,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { displayName, phoneNumber, email, password, status = 'offline' } = body;
+    const { displayName, phoneNumber, password, status = 'offline' } = body;
 
     if (!displayName?.trim() || !phoneNumber?.trim()) {
       return NextResponse.json(
@@ -102,15 +109,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Hash the password
-    const passwordHash = await hashPassword(password);
+    // Convert phone to email format (same as mobile app)
+    const authEmail = phoneToEmail(phoneNumber.trim());
 
-    const usersRef = collection(db, 'users');
-    const docRef = await addDoc(usersRef, {
+    // Create user in Firebase Authentication
+    const adminAuth = getAdminAuth();
+    const userRecord = await adminAuth.createUser({
+      email: authEmail,
+      password: password,
+      displayName: displayName.trim(),
+    });
+
+    // Create user document in Firestore with the same UID
+    const userRef = doc(db, 'users', userRecord.uid);
+    await setDoc(userRef, {
       displayName: displayName.trim(),
       phoneNumber: phoneNumber.trim(),
-      email: email?.trim() || null,
-      passwordHash,
+      email: authEmail,
       status,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -119,15 +134,30 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       user: {
-        id: docRef.id,
+        id: userRecord.uid,
         displayName: displayName.trim(),
         phoneNumber: phoneNumber.trim(),
-        email: email?.trim() || null,
+        email: authEmail,
         status,
       },
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error creating user:', error);
+
+    // Handle Firebase Auth specific errors
+    if (error.code === 'auth/email-already-exists') {
+      return NextResponse.json(
+        { error: 'A user with this phone number already exists' },
+        { status: 400 }
+      );
+    }
+    if (error.code === 'auth/invalid-password') {
+      return NextResponse.json(
+        { error: 'Password must be at least 6 characters' },
+        { status: 400 }
+      );
+    }
+
     return NextResponse.json(
       { error: 'Failed to create user' },
       { status: 500 }

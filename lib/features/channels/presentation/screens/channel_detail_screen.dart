@@ -235,6 +235,12 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
         ? ref.watch(livePttSessionProvider(channel.id))
         : null;
 
+    // Watch online members count
+    final membersAsync = AppConstants.useLiveStreaming
+        ? ref.watch(liveRoomMembersProvider(channel.id))
+        : null;
+    final onlineCount = membersAsync?.valueOrNull?.length ?? 0;
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
       child: Row(
@@ -285,14 +291,38 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
                     color: Colors.black87,
                   ),
                 ),
-                Text(
-                  session?.isConnected ?? false ? 'Available' : 'Connecting...',
-                  style: TextStyle(
-                    fontSize: 14,
-                    color: session?.isConnected ?? false
-                        ? Colors.green
-                        : Colors.orange,
-                  ),
+                Row(
+                  children: [
+                    // Online users count
+                    if (onlineCount > 0) ...[
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: const BoxDecoration(
+                          color: Colors.green,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        '$onlineCount online',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          color: Colors.green,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ] else
+                      Text(
+                        session?.isConnected ?? false ? 'Available' : 'Connecting...',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: session?.isConnected ?? false
+                              ? Colors.green
+                              : Colors.orange,
+                        ),
+                      ),
+                  ],
                 ),
               ],
             ),
@@ -386,26 +416,53 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          // Status indicator when someone is speaking
-          if (session.isListening)
+          // Speaker indicator - shown when someone is speaking OR when you are broadcasting
+          if (session.isListening || session.isBroadcasting)
             Container(
               margin: const EdgeInsets.only(bottom: 24),
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
               decoration: BoxDecoration(
-                color: Colors.green.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(20),
+                color: session.isBroadcasting
+                    ? Colors.red.withValues(alpha: 0.1)
+                    : Colors.green.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(
+                  color: session.isBroadcasting ? Colors.red : Colors.green,
+                  width: 2,
+                ),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.volume_up, color: Colors.green, size: 20),
-                  const SizedBox(width: 8),
-                  Text(
-                    '${session.currentSpeakerName ?? "Someone"} is speaking',
-                    style: const TextStyle(
-                      color: Colors.green,
-                      fontWeight: FontWeight.w600,
-                    ),
+                  // Animated speaker icon
+                  _AnimatedSpeakerIcon(
+                    isActive: true,
+                    color: session.isBroadcasting ? Colors.red : Colors.green,
+                  ),
+                  const SizedBox(width: 12),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        session.isBroadcasting
+                            ? 'You are speaking'
+                            : '${session.currentSpeakerName ?? "Someone"} is speaking',
+                        style: TextStyle(
+                          color: session.isBroadcasting ? Colors.red : Colors.green,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                      if (session.isBroadcasting && session.broadcastStartTime != null)
+                        Text(
+                          _formatDuration(session.broadcastDuration),
+                          style: TextStyle(
+                            color: Colors.red.withValues(alpha: 0.7),
+                            fontSize: 12,
+                          ),
+                        ),
+                    ],
                   ),
                 ],
               ),
@@ -431,6 +488,12 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
         ],
       ),
     );
+  }
+
+  String _formatDuration(Duration duration) {
+    final minutes = duration.inMinutes;
+    final seconds = duration.inSeconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
   }
 
   Widget _buildLegacyFullPagePtt(ChannelModel channel) {
@@ -499,6 +562,12 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
         ? ref.watch(livePttSessionProvider(channel.id))
         : null;
 
+    // Watch online members count
+    final membersAsync = AppConstants.useLiveStreaming
+        ? ref.watch(liveRoomMembersProvider(channel.id))
+        : null;
+    final onlineCount = membersAsync?.valueOrNull?.length ?? 0;
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       child: Row(
@@ -510,7 +579,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
             color: session?.isConnected ?? false ? AppColors.primary : Colors.grey,
             size: 24,
           ),
-          // Availability status
+          // Online users indicator
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             decoration: BoxDecoration(
@@ -520,18 +589,11 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    color: Colors.green,
-                    shape: BoxShape.circle,
-                  ),
-                ),
+                const Icon(Icons.people, color: Colors.green, size: 18),
                 const SizedBox(width: 6),
-                const Text(
-                  'Available',
-                  style: TextStyle(
+                Text(
+                  onlineCount > 0 ? '$onlineCount listening' : 'Ready',
+                  style: const TextStyle(
                     color: Colors.green,
                     fontWeight: FontWeight.w500,
                   ),
@@ -870,5 +932,96 @@ class _MessageHistorySheet extends ConsumerWidget {
   String _formatTime(DateTime? timestamp) {
     if (timestamp == null) return '';
     return DateFormat('h:mm a').format(timestamp);
+  }
+}
+
+// Animated speaker icon with sound waves
+class _AnimatedSpeakerIcon extends StatefulWidget {
+  final bool isActive;
+  final Color color;
+
+  const _AnimatedSpeakerIcon({
+    required this.isActive,
+    required this.color,
+  });
+
+  @override
+  State<_AnimatedSpeakerIcon> createState() => _AnimatedSpeakerIconState();
+}
+
+class _AnimatedSpeakerIconState extends State<_AnimatedSpeakerIcon>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+    _animation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+    );
+
+    if (widget.isActive) {
+      _controller.repeat(reverse: true);
+    }
+  }
+
+  @override
+  void didUpdateWidget(_AnimatedSpeakerIcon oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isActive && !_controller.isAnimating) {
+      _controller.repeat(reverse: true);
+    } else if (!widget.isActive && _controller.isAnimating) {
+      _controller.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (context, child) {
+        return SizedBox(
+          width: 32,
+          height: 32,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Icon(Icons.volume_up, color: widget.color, size: 24),
+              // Sound wave indicators
+              if (widget.isActive) ...[
+                Positioned(
+                  right: 0,
+                  child: Transform.scale(
+                    scale: 0.8 + (_animation.value * 0.2),
+                    child: Opacity(
+                      opacity: 1.0 - (_animation.value * 0.5),
+                      child: Container(
+                        width: 4,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: widget.color,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
   }
 }
