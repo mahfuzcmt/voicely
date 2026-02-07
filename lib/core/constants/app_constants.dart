@@ -8,9 +8,10 @@ class AppConstants {
   // Development (Android emulator): ws://10.0.2.2:8080
   // Development (iOS simulator): ws://localhost:8080
   // Production: wss://voicelyent.xyz
+  // Local testing (physical device): ws://192.168.1.41:8080
   static const String signalingServerUrl = String.fromEnvironment(
     'SIGNALING_SERVER_URL',
-    defaultValue: 'wss://voicelyent.xyz',
+    defaultValue: 'ws://10.0.2.2:8080',
   );
 
   // Live streaming settings

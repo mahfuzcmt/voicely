@@ -53,6 +53,17 @@ app.get('/stats', (_req: Request, res: Response) => {
   });
 });
 
+// Debug endpoint to check auth configuration
+app.get('/debug', (_req: Request, res: Response) => {
+  res.json({
+    nodeEnv: process.env.NODE_ENV || 'not set',
+    hasFirebaseCredentials: !!process.env.GOOGLE_APPLICATION_CREDENTIALS,
+    credentialsPath: process.env.GOOGLE_APPLICATION_CREDENTIALS ? '[set]' : '[not set]',
+    skipAuth: process.env.SKIP_AUTH === 'true',
+    port: PORT,
+  });
+});
+
 // Create HTTP server
 const server = http.createServer(app);
 

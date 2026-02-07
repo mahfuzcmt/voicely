@@ -4,14 +4,18 @@ import { AuthenticatedWebSocket, MessageType, AuthSuccessMessage, AuthFailedMess
 // Initialize Firebase Admin if not already initialized
 let firebaseInitialized = false;
 const isDevelopment = process.env.NODE_ENV !== 'production';
+const skipAuth = process.env.SKIP_AUTH === 'true';
 
 export function initializeFirebase(): void {
   if (firebaseInitialized) return;
 
-  // In development mode without credentials, skip Firebase init
-  if (isDevelopment && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-    console.log('⚠️  Development mode: Firebase auth disabled (no credentials)');
+  // In development mode or skip auth mode without credentials, skip Firebase init
+  if ((isDevelopment || skipAuth) && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    console.log('⚠️  Auth bypass mode: Firebase auth disabled (no credentials)');
     console.log('   Set GOOGLE_APPLICATION_CREDENTIALS for real auth');
+    if (skipAuth) {
+      console.log('   SKIP_AUTH=true is set - accepting all tokens');
+    }
     firebaseInitialized = true;
     return;
   }
@@ -48,9 +52,9 @@ export interface AuthResult {
  * Verify Firebase ID token and extract user info
  */
 export async function verifyToken(token: string): Promise<AuthResult> {
-  // Development mode: accept any token and extract user info from it
+  // Development mode or skip auth: accept any token and extract user info from it
   // Token format for dev: "dev_userId_displayName" or actual Firebase token
-  if (isDevelopment && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  if ((isDevelopment || skipAuth) && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     // Check if it's a dev token format
     if (token.startsWith('dev_')) {
       const parts = token.split('_');
@@ -111,7 +115,10 @@ export async function handleAuth(
   ws: AuthenticatedWebSocket,
   token: string
 ): Promise<boolean> {
+  console.log(`Auth attempt - token length: ${token?.length || 0}, isDev: ${isDevelopment}, hasCredentials: ${!!process.env.GOOGLE_APPLICATION_CREDENTIALS}`);
+
   const result = await verifyToken(token);
+  console.log(`Auth result: success=${result.success}, userId=${result.userId}, error=${result.error}`);
 
   if (result.success) {
     // Store user info on WebSocket
