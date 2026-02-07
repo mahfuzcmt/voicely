@@ -1,0 +1,53 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper function to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Users collection - allow admin panel access
+    match /users/{uid} {
+      allow read, write: if true;
+    }
+
+    // Channels collection - allow admin panel access
+    match /channels/{channelId} {
+      allow read, write: if true;
+
+      // All subcollections under channels
+      match /{subcollection}/{document=**} {
+        allow read, write: if true;
+      }
+    }
+
+    // Messages collection
+    match /messages/{messageId} {
+      allow read, write: if true;
+    }
+
+    // Floor control for PTT (top-level)
+    match /floorControl/{document=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Signaling for WebRTC (top-level)
+    match /signaling/{document=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // ICE candidates for WebRTC (top-level)
+    match /iceCandidates/{document=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Admins collection for admin panel
+    // Allow read for login, allow write for creating admin accounts
+    match /admins/{adminId} {
+      allow read: if true;
+      allow write: if true;
+    }
+  }
+}
