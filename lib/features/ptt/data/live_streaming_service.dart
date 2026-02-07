@@ -286,6 +286,13 @@ class LiveStreamingService {
       final pc = await _createPeerConnection(fromUserId);
       _peerConnections[fromUserId] = pc;
 
+      // Add transceiver to receive audio (important for mobile!)
+      debugPrint('LiveStream: Adding audio transceiver for receiving');
+      await pc.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+      );
+
       // Set remote description
       debugPrint('LiveStream: Setting remote description');
       await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
@@ -425,23 +432,45 @@ class LiveStreamingService {
 
     // Handle incoming tracks (for listeners)
     pc.onTrack = (RTCTrackEvent event) {
-      debugPrint('LiveStream: onTrack fired! track kind: ${event.track.kind}, streams: ${event.streams.length}');
-      if (event.streams.isNotEmpty) {
-        final remoteStream = event.streams.first;
-        _remoteStreams[peerId] = remoteStream;
-        _remoteStreamController.add(remoteStream);
-        debugPrint('LiveStream: Remote stream received from $peerId, tracks: ${remoteStream.getTracks().length}');
+      debugPrint('LiveStream: *** onTrack fired! ***');
+      debugPrint('LiveStream: Track kind: ${event.track.kind}, id: ${event.track.id}');
+      debugPrint('LiveStream: Track enabled: ${event.track.enabled}, muted: ${event.track.muted}');
+      debugPrint('LiveStream: Streams count: ${event.streams.length}');
 
-        // Enable audio tracks
-        for (final track in remoteStream.getAudioTracks()) {
-          track.enabled = true;
-          debugPrint('LiveStream: Audio track enabled: ${track.id}');
+      if (event.track.kind == 'audio') {
+        // Ensure track is enabled
+        event.track.enabled = true;
+        debugPrint('LiveStream: Audio track enabled');
+
+        if (event.streams.isNotEmpty) {
+          final remoteStream = event.streams.first;
+          _remoteStreams[peerId] = remoteStream;
+          _remoteStreamController.add(remoteStream);
+          debugPrint('LiveStream: Remote stream added from $peerId');
+          debugPrint('LiveStream: Stream tracks: ${remoteStream.getTracks().length}');
+          debugPrint('LiveStream: Audio tracks: ${remoteStream.getAudioTracks().length}');
+
+          // Double-check all audio tracks are enabled
+          for (final track in remoteStream.getAudioTracks()) {
+            track.enabled = true;
+            debugPrint('LiveStream: Enabled audio track: ${track.id}');
+          }
+        } else {
+          // No stream, but we have a track - create a stream
+          debugPrint('LiveStream: No stream in event, track only');
         }
       }
     };
 
     pc.onIceConnectionState = (RTCIceConnectionState state) {
-      debugPrint('LiveStream: ICE state with $peerId: $state');
+      debugPrint('LiveStream: *** ICE Connection State: $state ***');
+      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+        debugPrint('LiveStream: ICE CONNECTED! Audio should flow now.');
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        debugPrint('LiveStream: ICE FAILED! Check TURN servers.');
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+        debugPrint('LiveStream: ICE DISCONNECTED');
+      }
     };
 
     pc.onSignalingState = (RTCSignalingState state) {
