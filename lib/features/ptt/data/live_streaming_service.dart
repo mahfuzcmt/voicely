@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../../core/constants/app_constants.dart';
+import '../../../core/services/native_audio_service.dart';
 import '../../../core/utils/logger.dart';
 import 'websocket_signaling_service.dart';
 
@@ -39,6 +40,7 @@ class LiveStreamingService {
   MediaStream? _localStream;
   final Map<String, RTCPeerConnection> _peerConnections = {};
   final Map<String, MediaStream> _remoteStreams = {};
+  final Map<String, RTCVideoRenderer> _audioRenderers = {};
   final Map<String, List<RTCIceCandidate>> _pendingIceCandidates = {};
   final List<RTCIceCandidate> _localIceCandidates = [];
   Timer? _iceBatchTimer;
@@ -205,12 +207,21 @@ class LiveStreamingService {
     // Check if we got the floor
     if (floor.speakerId == _wsService.userId) {
       // We got the floor - start streaming
+      debugPrint('LiveStream: We got the floor, starting to broadcast');
       _isBroadcasting = true;
       _updateState(LiveStreamingState.broadcasting);
       _setLocalAudioEnabled(true);
       _startStreamingToListeners();
     } else {
       // Someone else is speaking - prepare to receive
+      debugPrint('LiveStream: Someone else is speaking: ${floor.speakerName}');
+
+      // If we were broadcasting, stop and clean up
+      if (_isBroadcasting) {
+        debugPrint('LiveStream: We were broadcasting, cleaning up');
+        _closeAllPeerConnections();
+      }
+
       _isBroadcasting = false;
       _updateState(LiveStreamingState.listening);
     }
@@ -243,7 +254,23 @@ class LiveStreamingService {
   /// Create WebRTC offer for broadcasting
   Future<RTCSessionDescription?> _createOffer() async {
     try {
-      // Create a "template" peer connection for offer generation
+      // IMPORTANT: Close any existing 'broadcast' peer connection first
+      // This prevents "CreateOffer called when PeerConnection is closed" errors
+      if (_peerConnections.containsKey('broadcast')) {
+        debugPrint('LiveStream: Closing existing broadcast peer connection');
+        final oldPc = _peerConnections.remove('broadcast');
+        try {
+          await oldPc?.close();
+        } catch (e) {
+          debugPrint('LiveStream: Error closing old broadcast connection: $e');
+        }
+      }
+
+      // Also close any listening peer connections
+      await _closeAllPeerConnections();
+
+      // Create a fresh peer connection for offer generation
+      debugPrint('LiveStream: Creating new broadcast peer connection');
       final pc = await _createPeerConnection('broadcast');
       _peerConnections['broadcast'] = pc;
 
@@ -266,6 +293,7 @@ class LiveStreamingService {
       return offer;
     } catch (e) {
       Logger.e('Failed to create offer', error: e);
+      debugPrint('LiveStream: Error creating offer: $e');
       return null;
     }
   }
@@ -281,6 +309,10 @@ class LiveStreamingService {
     debugPrint('LiveStream: Received offer from $fromUserId, sdp length: ${sdp.length}');
 
     try {
+      // CRITICAL: Configure audio for playback BEFORE creating peer connection
+      debugPrint('LiveStream: Configuring audio for receiving');
+      await _configureAudioForReceiving();
+
       // Create peer connection for this speaker
       debugPrint('LiveStream: Creating peer connection for $fromUserId');
       final pc = await _createPeerConnection(fromUserId);
@@ -453,13 +485,27 @@ class LiveStreamingService {
     };
 
     // Handle incoming tracks (for listeners)
-    pc.onTrack = (RTCTrackEvent event) {
+    pc.onTrack = (RTCTrackEvent event) async {
       debugPrint('LiveStream: *** onTrack fired! ***');
       debugPrint('LiveStream: Track kind: ${event.track.kind}, id: ${event.track.id}');
       debugPrint('LiveStream: Track enabled: ${event.track.enabled}, muted: ${event.track.muted}');
       debugPrint('LiveStream: Streams count: ${event.streams.length}');
 
       if (event.track.kind == 'audio') {
+        // CRITICAL: Use native Android audio control for reliable speakerphone
+        debugPrint('LiveStream: Enabling native speakerphone on track receive...');
+        try {
+          // Native Android AudioManager (most reliable)
+          final nativeSpeaker = await NativeAudioService.setSpeakerOn(true);
+          debugPrint('LiveStream: Native speakerphone result: $nativeSpeaker');
+
+          // Also try flutter_webrtc Helper as backup
+          await Helper.setSpeakerphoneOn(true);
+          debugPrint('LiveStream: Flutter speakerphone enabled');
+        } catch (e) {
+          debugPrint('LiveStream: Failed to enable speakerphone: $e');
+        }
+
         // Ensure track is enabled
         event.track.enabled = true;
         debugPrint('LiveStream: Audio track enabled');
@@ -467,16 +513,31 @@ class LiveStreamingService {
         if (event.streams.isNotEmpty) {
           final remoteStream = event.streams.first;
           _remoteStreams[peerId] = remoteStream;
+
+          // CRITICAL: Create an RTCVideoRenderer to actually play the audio
+          // Even for audio-only streams, the renderer is needed to consume the stream
+          debugPrint('LiveStream: Creating audio renderer for $peerId');
+          await _createAudioRenderer(peerId, remoteStream);
+
           _remoteStreamController.add(remoteStream);
           debugPrint('LiveStream: Remote stream added from $peerId');
           debugPrint('LiveStream: Stream tracks: ${remoteStream.getTracks().length}');
           debugPrint('LiveStream: Audio tracks: ${remoteStream.getAudioTracks().length}');
 
-          // Double-check all audio tracks are enabled
+          // Double-check all audio tracks are enabled and not muted
           for (final track in remoteStream.getAudioTracks()) {
             track.enabled = true;
-            debugPrint('LiveStream: Enabled audio track: ${track.id}');
+            debugPrint('LiveStream: Enabled audio track: ${track.id}, muted: ${track.muted}');
           }
+
+          // Final native speakerphone check with delay
+          await Future.delayed(const Duration(milliseconds: 100));
+          await NativeAudioService.setSpeakerOn(true);
+          debugPrint('LiveStream: Final native speakerphone enable after setup');
+
+          // Log final audio state
+          final audioState = await NativeAudioService.getAudioState();
+          debugPrint('LiveStream: Final audio state: $audioState');
         } else {
           // No stream, but we have a track - create a stream
           debugPrint('LiveStream: No stream in event, track only');
@@ -539,6 +600,80 @@ class LiveStreamingService {
     Logger.d('Sent ${candidates.length} ICE candidates');
   }
 
+  /// Configure audio session and routing for receiving WebRTC audio
+  Future<void> _configureAudioForReceiving() async {
+    try {
+      // Use native Android audio manager for reliable audio routing
+      debugPrint('LiveStream: Configuring native audio for voice chat...');
+
+      // First, configure Android AudioManager for voice communication mode
+      final modeSet = await NativeAudioService.setAudioModeForVoiceChat();
+      debugPrint('LiveStream: Native audio mode set: $modeSet');
+
+      // Then enable speakerphone via native code
+      final speakerSet = await NativeAudioService.setSpeakerOn(true);
+      debugPrint('LiveStream: Native speakerphone enabled: $speakerSet');
+
+      // Also try the flutter_webrtc Helper as backup
+      try {
+        await Helper.setSpeakerphoneOn(true);
+        debugPrint('LiveStream: Flutter Helper speakerphone also enabled');
+      } catch (e) {
+        debugPrint('LiveStream: Flutter Helper speakerphone failed (ok): $e');
+      }
+
+      // Log audio state for debugging
+      final audioState = await NativeAudioService.getAudioState();
+      debugPrint('LiveStream: Audio state after config: $audioState');
+    } catch (e) {
+      debugPrint('LiveStream: Failed to configure audio for receiving: $e');
+    }
+  }
+
+  /// Create an audio renderer to play the remote stream
+  /// In Flutter WebRTC, even audio-only streams need a renderer to be consumed
+  Future<void> _createAudioRenderer(String peerId, MediaStream stream) async {
+    try {
+      // Dispose existing renderer if any
+      if (_audioRenderers.containsKey(peerId)) {
+        await _audioRenderers[peerId]!.dispose();
+      }
+
+      // Create and initialize the renderer
+      final renderer = RTCVideoRenderer();
+      await renderer.initialize();
+
+      // Attach the stream to the renderer
+      renderer.srcObject = stream;
+
+      _audioRenderers[peerId] = renderer;
+      debugPrint('LiveStream: Audio renderer created and stream attached for $peerId');
+
+      // CRITICAL: Use native Android audio to ensure speakerphone is on after renderer setup
+      // This is the most reliable way to route audio to the speaker
+      try {
+        // Short delay to let Android audio routing settle
+        await Future.delayed(const Duration(milliseconds: 50));
+
+        // Native Android AudioManager (most reliable)
+        final nativeResult = await NativeAudioService.setSpeakerOn(true);
+        debugPrint('LiveStream: Native speakerphone after renderer: $nativeResult');
+
+        // Also try Flutter helper
+        await Helper.setSpeakerphoneOn(true);
+        debugPrint('LiveStream: Flutter speakerphone re-confirmed enabled');
+
+        // Log audio state
+        final audioState = await NativeAudioService.getAudioState();
+        debugPrint('LiveStream: Audio state after renderer: $audioState');
+      } catch (e) {
+        debugPrint('LiveStream: Failed to set speakerphone after renderer: $e');
+      }
+    } catch (e) {
+      debugPrint('LiveStream: Failed to create audio renderer: $e');
+    }
+  }
+
   /// Close a specific peer connection
   Future<void> _closePeerConnection(String peerId) async {
     final pc = _peerConnections.remove(peerId);
@@ -549,6 +684,14 @@ class LiveStreamingService {
     final stream = _remoteStreams.remove(peerId);
     if (stream != null) {
       await stream.dispose();
+    }
+
+    // Dispose the audio renderer
+    final renderer = _audioRenderers.remove(peerId);
+    if (renderer != null) {
+      renderer.srcObject = null;
+      await renderer.dispose();
+      debugPrint('LiveStream: Audio renderer disposed for $peerId');
     }
 
     _pendingIceCandidates.remove(peerId);
@@ -590,6 +733,13 @@ class LiveStreamingService {
     _floorSubscription?.cancel();
 
     await _closeAllPeerConnections();
+
+    // Dispose all audio renderers
+    for (final renderer in _audioRenderers.values) {
+      renderer.srcObject = null;
+      await renderer.dispose();
+    }
+    _audioRenderers.clear();
 
     if (_localStream != null) {
       for (final track in _localStream!.getTracks()) {

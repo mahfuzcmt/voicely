@@ -9,10 +9,12 @@ import '../providers/live_ptt_providers.dart';
 /// Enhanced PTT button for real-time streaming
 class LivePttButton extends ConsumerStatefulWidget {
   final String channelId;
+  final double size;
 
   const LivePttButton({
     super.key,
     required this.channelId,
+    this.size = 120,
   });
 
   @override
@@ -120,7 +122,7 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
           const SizedBox(height: 8),
         ],
 
-        // Main PTT button
+        // Main PTT button with new design
         GestureDetector(
           onTapDown: (_) => _onPressStart(),
           onTapUp: (_) => _onPressEnd(),
@@ -141,46 +143,7 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
                 child: child,
               );
             },
-            child: Container(
-              width: 120,
-              height: 120,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _getButtonColor(session),
-                boxShadow: [
-                  BoxShadow(
-                    color: _getButtonColor(session).withValues(alpha: 0.4),
-                    blurRadius: session.isBroadcasting ? 30 : 15,
-                    spreadRadius: session.isBroadcasting ? 5 : 0,
-                  ),
-                ],
-              ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    _getIcon(session),
-                    size: 48,
-                    color: Colors.white,
-                  ),
-                  if (session.isBroadcasting) ...[
-                    const SizedBox(height: 4),
-                    _buildRecordingIndicator(),
-                  ],
-                  if (session.state == LivePttState.requestingFloor) ...[
-                    const SizedBox(height: 4),
-                    const SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
+            child: _buildPttButtonDesign(session),
           ),
         ),
 
@@ -191,6 +154,137 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
         ],
       ],
     );
+  }
+
+  /// Build the PTT button with the new design matching the UI mockup
+  Widget _buildPttButtonDesign(LivePttSessionState session) {
+    final ringColor = _getRingColor(session);
+    final iconColor = _getIconColor(session);
+    final isActive = session.isBroadcasting || session.state == LivePttState.requestingFloor;
+
+    return SizedBox(
+      width: widget.size,
+      height: widget.size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          // Outer subtle ring (light gray)
+          Container(
+            width: widget.size,
+            height: widget.size,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.grey[100],
+            ),
+          ),
+
+          // Orange/colored ring
+          Container(
+            width: widget.size * 0.85,
+            height: widget.size * 0.85,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: ringColor,
+                width: widget.size * 0.025,
+              ),
+            ),
+          ),
+
+          // White center with icon
+          Container(
+            width: widget.size * 0.7,
+            height: widget.size * 0.7,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.1),
+                  blurRadius: 10,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  _getIcon(session),
+                  size: widget.size * 0.25,
+                  color: iconColor,
+                ),
+                if (session.isBroadcasting) ...[
+                  SizedBox(height: widget.size * 0.02),
+                  _buildRecordingIndicator(iconColor),
+                ],
+                if (session.state == LivePttState.requestingFloor) ...[
+                  SizedBox(height: widget.size * 0.02),
+                  SizedBox(
+                    width: widget.size * 0.12,
+                    height: widget.size * 0.12,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(iconColor),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+
+          // Pulsing overlay when broadcasting
+          if (isActive)
+            Container(
+              width: widget.size * 0.85,
+              height: widget.size * 0.85,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: ringColor.withValues(alpha: 0.3),
+                  width: widget.size * 0.05,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Color _getRingColor(LivePttSessionState session) {
+    switch (session.state) {
+      case LivePttState.idle:
+        return session.isConnected ? Colors.orange : Colors.grey;
+      case LivePttState.connecting:
+      case LivePttState.requestingFloor:
+        return Colors.orange;
+      case LivePttState.broadcasting:
+        return Colors.red;
+      case LivePttState.listening:
+        return Colors.green;
+      case LivePttState.error:
+        return Colors.red;
+      case LivePttState.disconnected:
+        return Colors.grey;
+    }
+  }
+
+  Color _getIconColor(LivePttSessionState session) {
+    switch (session.state) {
+      case LivePttState.idle:
+        return session.isConnected ? AppColors.primary : Colors.grey;
+      case LivePttState.connecting:
+      case LivePttState.requestingFloor:
+        return Colors.orange;
+      case LivePttState.broadcasting:
+        return Colors.red;
+      case LivePttState.listening:
+        return Colors.green;
+      case LivePttState.error:
+        return Colors.red;
+      case LivePttState.disconnected:
+        return Colors.grey;
+    }
   }
 
   Widget _buildStatusIndicator(LivePttSessionState session) {
@@ -345,12 +439,12 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
     }
   }
 
-  Widget _buildRecordingIndicator() {
+  Widget _buildRecordingIndicator([Color? color]) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: List.generate(
         5,
-        (index) => _AudioBar(delay: index * 100),
+        (index) => _AudioBar(delay: index * 100, color: color ?? Colors.white),
       ),
     );
   }
@@ -358,8 +452,9 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
 
 class _AudioBar extends StatefulWidget {
   final int delay;
+  final Color color;
 
-  const _AudioBar({required this.delay});
+  const _AudioBar({required this.delay, this.color = Colors.white});
 
   @override
   State<_AudioBar> createState() => _AudioBarState();
@@ -404,7 +499,7 @@ class _AudioBarState extends State<_AudioBar>
           height: _animation.value,
           margin: const EdgeInsets.symmetric(horizontal: 1),
           decoration: BoxDecoration(
-            color: Colors.white,
+            color: widget.color,
             borderRadius: BorderRadius.circular(2),
           ),
         );

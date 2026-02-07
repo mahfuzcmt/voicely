@@ -11,7 +11,7 @@ class AppConstants {
   // Local testing (physical device): ws://192.168.1.41:8080
   static const String signalingServerUrl = String.fromEnvironment(
     'SIGNALING_SERVER_URL',
-    defaultValue: 'ws://10.0.2.2:8080',
+    defaultValue: 'wss://voicelyent.xyz',
   );
 
   // Live streaming settings

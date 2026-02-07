@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import '../../../../core/services/native_audio_service.dart';
 import '../../../../di/providers.dart';
 import '../../data/live_streaming_service.dart';
 import '../../data/websocket_signaling_service.dart';
@@ -353,23 +354,73 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState> {
   Future<void> _playRemoteStream(MediaStream stream) async {
     debugPrint('LivePTT: Playing remote stream: ${stream.id}');
 
-    // Configure audio session for receiving
+    // CRITICAL: Use native Android AudioManager for reliable audio routing
+    debugPrint('LivePTT: Configuring native audio for playback...');
+    try {
+      // First, set up Android audio mode for voice communication
+      final modeResult = await NativeAudioService.setAudioModeForVoiceChat();
+      debugPrint('LivePTT: Native audio mode result: $modeResult');
+
+      // Then enable speakerphone via native code
+      final speakerResult = await NativeAudioService.setSpeakerOn(true);
+      debugPrint('LivePTT: Native speakerphone result: $speakerResult');
+    } catch (e) {
+      debugPrint('LivePTT: Native audio setup error: $e');
+    }
+
+    // Configure audio session for receiving (Flutter layer)
     final audioManager = _ref.read(audioSessionProvider);
     await audioManager.configureForReceiving();
     await audioManager.activate();
 
-    // Enable speakerphone for WebRTC audio
-    try {
-      await Helper.setSpeakerphoneOn(true);
-      debugPrint('LivePTT: Speakerphone enabled');
-    } catch (e) {
-      debugPrint('LivePTT: Failed to enable speakerphone: $e');
-    }
-
-    // Ensure all audio tracks are enabled
+    // Ensure all audio tracks are enabled FIRST
     for (final track in stream.getAudioTracks()) {
       track.enabled = true;
       debugPrint('LivePTT: Audio track ${track.id} enabled');
+    }
+
+    // Enable speakerphone via native Android + flutter_webrtc multiple times
+    // This is needed because Android audio routing can be slow to switch
+    for (int i = 0; i < 3; i++) {
+      try {
+        // Native Android method (most reliable)
+        await NativeAudioService.setSpeakerOn(true);
+        debugPrint('LivePTT: Native speakerphone enabled (attempt ${i + 1})');
+
+        // Also try Flutter helper
+        await Helper.setSpeakerphoneOn(true);
+        debugPrint('LivePTT: Flutter speakerphone enabled (attempt ${i + 1})');
+
+        // Small delay to let the audio routing settle
+        await Future.delayed(const Duration(milliseconds: 200));
+      } catch (e) {
+        debugPrint('LivePTT: Failed to enable speakerphone (attempt ${i + 1}): $e');
+      }
+    }
+
+    // Also try to select audio output device explicitly
+    try {
+      // Get available audio output devices and select speaker
+      final devices = await Helper.enumerateDevices('audiooutput');
+      debugPrint('LivePTT: Available audio outputs: ${devices.length}');
+      for (final device in devices) {
+        debugPrint('LivePTT: Audio output: ${device.label} (${device.deviceId})');
+        if (device.label.toLowerCase().contains('speaker')) {
+          await Helper.selectAudioOutput(device.deviceId);
+          debugPrint('LivePTT: Selected speaker output');
+          break;
+        }
+      }
+    } catch (e) {
+      debugPrint('LivePTT: Failed to enumerate/select audio output: $e');
+    }
+
+    // Final check: log audio state
+    try {
+      final audioState = await NativeAudioService.getAudioState();
+      debugPrint('LivePTT: Final audio state: $audioState');
+    } catch (e) {
+      debugPrint('LivePTT: Failed to get audio state: $e');
     }
 
     debugPrint('LivePTT: Remote audio should now be playing');

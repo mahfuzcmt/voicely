@@ -131,10 +131,23 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
     }
   }
 
+  void _showMessageHistory() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => _MessageHistorySheet(
+        channelId: widget.channelId,
+        channelName: _channelName ?? 'Channel',
+        onPlayMessage: _playAudio,
+        currentlyPlayingId: _currentlyPlayingId,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final channelAsync = ref.watch(channelProvider(widget.channelId));
-    final messagesAsync = ref.watch(channelMessagesProvider(widget.channelId));
     final autoPlayEnabled = ref.watch(autoPlayEnabledProvider);
 
     return channelAsync.when(
@@ -157,111 +170,26 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
         _channelName = channel.name;
 
         return Scaffold(
-          backgroundColor: AppColors.backgroundDark,
-          appBar: AppBar(
-            title: Text(channel.name),
-            centerTitle: true,
-            actions: [
-              // Auto-play toggle
-              IconButton(
-                icon: Icon(
-                  autoPlayEnabled ? Icons.volume_up : Icons.volume_off,
-                  color: autoPlayEnabled ? AppColors.primary : null,
-                ),
-                tooltip: autoPlayEnabled ? 'Auto-play ON' : 'Auto-play OFF',
-                onPressed: () {
-                  ref.read(autoPlayEnabledProvider.notifier).state = !autoPlayEnabled;
-                  context.showSnackBar(
-                    autoPlayEnabled ? 'Auto-play disabled' : 'Auto-play enabled',
-                  );
-                },
-              ),
-            ],
-          ),
+          backgroundColor: Colors.white,
           body: SafeArea(
             child: Column(
               children: [
-                // Playing indicator
-                if (_currentlyPlayingId != null)
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    color: AppColors.primary.withValues(alpha: 0.2),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.volume_up, color: AppColors.primary, size: 20),
-                        const SizedBox(width: 8),
-                        Text(
-                          'Playing voice message...',
-                          style: TextStyle(color: AppColors.primary),
-                        ),
-                        const SizedBox(width: 8),
-                        GestureDetector(
-                          onTap: () async {
-                            await _audioPlayer?.stop();
-                            setState(() => _currentlyPlayingId = null);
-                          },
-                          child: Icon(Icons.stop_circle, color: AppColors.primary, size: 24),
-                        ),
-                      ],
-                    ),
-                  ),
+                // Top bar with back, title, and archive button
+                _buildTopBar(channel, autoPlayEnabled),
 
-                // Message history list
+                // User/Channel info section
+                _buildChannelInfo(channel),
+
+                // Action buttons (camera, emergency, notifications)
+                _buildActionButtons(),
+
+                // Main PTT area - takes most of the space
                 Expanded(
-                  child: messagesAsync.when(
-                    loading: () => const Center(child: CircularProgressIndicator()),
-                    error: (error, _) {
-                      // Check if it's an index building error
-                      final errorStr = error.toString();
-                      if (errorStr.contains('index') && errorStr.contains('building')) {
-                        return const Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              CircularProgressIndicator(),
-                              SizedBox(height: 16),
-                              Text(
-                                'Setting up...\nPlease wait a moment',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(color: AppColors.textSecondaryDark),
-                              ),
-                            ],
-                          ),
-                        );
-                      }
-                      return Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Icon(Icons.error_outline, size: 48, color: AppColors.error),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Unable to load messages',
-                              style: TextStyle(color: AppColors.textSecondaryDark),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                    data: (messages) {
-                      if (messages.isEmpty) {
-                        return const Center(
-                          child: Text(
-                            'No messages yet\nPress and hold the button to record',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: AppColors.textSecondaryDark),
-                          ),
-                        );
-                      }
-                      return _buildMessageList(messages);
-                    },
-                  ),
+                  child: _buildFullPagePttArea(channel),
                 ),
 
-                // PTT Button area
-                _buildPttArea(channel),
+                // Bottom status bar
+                _buildBottomStatusBar(channel),
               ],
             ),
           ),
@@ -270,209 +198,353 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
     );
   }
 
-  Widget _buildMessageList(List<MessageModel> messages) {
-    return ListView.builder(
-      reverse: true,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      itemCount: messages.length,
-      itemBuilder: (context, index) {
-        final message = messages[index];
-        final currentUser = ref.read(authStateProvider).value;
-        final isMe = message.senderId == currentUser?.uid;
-        final isPlaying = _currentlyPlayingId == message.id;
-
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: Row(
-            mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-            children: [
-              Container(
-                constraints: BoxConstraints(
-                  maxWidth: MediaQuery.of(context).size.width * 0.75,
-                ),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: isMe ? AppColors.primary.withValues(alpha: 0.2) : AppColors.cardDark,
-                  borderRadius: BorderRadius.circular(16),
-                  border: isPlaying ? Border.all(color: AppColors.primary, width: 2) : null,
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Play button
-                    GestureDetector(
-                      onTap: () => _playAudio(message),
-                      child: Container(
-                        width: 44,
-                        height: 44,
-                        decoration: BoxDecoration(
-                          color: isPlaying ? AppColors.primary : (isMe ? AppColors.primary : AppColors.surfaceDark),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          isPlaying ? Icons.stop : Icons.play_arrow,
-                          color: isPlaying || isMe ? Colors.black : Colors.white,
-                          size: 24,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    // Message info
-                    Flexible(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            isMe ? 'You' : message.senderName,
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 13,
-                              color: isMe ? AppColors.primary : Colors.white,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.mic,
-                                size: 14,
-                                color: AppColors.textSecondaryDark,
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                '${message.audioDuration ?? 0}s',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: AppColors.textSecondaryDark,
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                _formatTime(message.timestamp),
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: AppColors.textSecondaryDark,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  String _formatTime(DateTime? timestamp) {
-    if (timestamp == null) return '';
-    final now = DateTime.now();
-    final diff = now.difference(timestamp);
-
-    if (diff.inMinutes < 1) {
-      return 'Just now';
-    } else if (diff.inHours < 1) {
-      return '${diff.inMinutes}m ago';
-    } else if (diff.inDays < 1) {
-      return DateFormat('HH:mm').format(timestamp);
-    } else {
-      return DateFormat('MMM d, HH:mm').format(timestamp);
-    }
-  }
-
-  Widget _buildPttArea(ChannelModel channel) {
-    // Use live streaming mode if enabled
-    if (AppConstants.useLiveStreaming) {
-      return _buildLivePttArea(channel);
-    }
-
-    // Legacy record-upload mode
-    final session = ref.watch(pttSessionProvider(channel.id));
-
-    String statusText;
-    switch (session.state) {
-      case PttState.idle:
-        statusText = 'Hold to record';
-      case PttState.recording:
-        statusText = 'Recording...';
-      case PttState.uploading:
-        statusText = 'Sending...';
-      case PttState.error:
-        statusText = session.errorMessage ?? 'Error';
-    }
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
-      decoration: BoxDecoration(
-        color: AppColors.surfaceDark,
-        border: Border(top: BorderSide(color: AppColors.cardDark)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+  Widget _buildTopBar(ChannelModel channel, bool autoPlayEnabled) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      child: Row(
         children: [
-          // Status text
-          Text(
-            statusText,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: session.isRecording ? Colors.red : AppColors.textSecondaryDark,
-                  fontWeight: session.isRecording ? FontWeight.bold : FontWeight.normal,
-                ),
+          // Back button
+          IconButton(
+            icon: const Icon(Icons.arrow_back_ios, color: AppColors.primary),
+            onPressed: () => Navigator.pop(context),
           ),
-          const SizedBox(height: 16),
-          // PTT Button
-          PttButton(channelId: channel.id),
+          const Spacer(),
+          // Archive/Message history button
+          IconButton(
+            icon: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.primary,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.chat_bubble,
+                color: Colors.white,
+                size: 20,
+              ),
+            ),
+            onPressed: _showMessageHistory,
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildLivePttArea(ChannelModel channel) {
+  Widget _buildChannelInfo(ChannelModel channel) {
+    final session = AppConstants.useLiveStreaming
+        ? ref.watch(livePttSessionProvider(channel.id))
+        : null;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+      child: Row(
+        children: [
+          // Channel avatar
+          Stack(
+            children: [
+              CircleAvatar(
+                radius: 28,
+                backgroundColor: AppColors.surfaceDark,
+                child: Text(
+                  channel.name.isNotEmpty ? channel.name[0].toUpperCase() : 'C',
+                  style: const TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+              // Online indicator
+              if (session?.isConnected ?? false)
+                Positioned(
+                  bottom: 2,
+                  left: 2,
+                  child: Container(
+                    width: 14,
+                    height: 14,
+                    decoration: BoxDecoration(
+                      color: Colors.green,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(width: 12),
+          // Channel name and status
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  channel.name,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black87,
+                  ),
+                ),
+                Text(
+                  session?.isConnected ?? false ? 'Available' : 'Connecting...',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: session?.isConnected ?? false
+                        ? Colors.green
+                        : Colors.orange,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // More options
+          IconButton(
+            icon: const Icon(Icons.more_horiz, color: Colors.grey),
+            onPressed: () {
+              // Show channel options
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButtons() {
+    final autoPlayEnabled = ref.watch(autoPlayEnabledProvider);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          // Camera button (placeholder)
+          _ActionButton(
+            icon: Icons.camera_alt,
+            color: AppColors.primary,
+            onTap: () {
+              context.showSnackBar('Camera feature coming soon');
+            },
+          ),
+          // Emergency button
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.red.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.warning, color: Colors.red, size: 18),
+                const SizedBox(width: 6),
+                const Text(
+                  'Emergency',
+                  style: TextStyle(
+                    color: Colors.red,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Container(
+                  padding: const EdgeInsets.all(2),
+                  decoration: BoxDecoration(
+                    color: Colors.orange,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.lock, color: Colors.white, size: 12),
+                ),
+              ],
+            ),
+          ),
+          // Auto-play/notification button
+          _ActionButton(
+            icon: autoPlayEnabled ? Icons.notifications_active : Icons.notifications_off,
+            color: autoPlayEnabled ? AppColors.primary : Colors.grey,
+            onTap: () {
+              ref.read(autoPlayEnabledProvider.notifier).state = !autoPlayEnabled;
+              context.showSnackBar(
+                autoPlayEnabled ? 'Auto-play disabled' : 'Auto-play enabled',
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFullPagePttArea(ChannelModel channel) {
+    if (AppConstants.useLiveStreaming) {
+      return _buildLiveFullPagePtt(channel);
+    }
+    return _buildLegacyFullPagePtt(channel);
+  }
+
+  Widget _buildLiveFullPagePtt(ChannelModel channel) {
     final session = ref.watch(livePttSessionProvider(channel.id));
 
-    String statusText;
-    switch (session.state) {
-      case LivePttState.idle:
-        statusText = 'Hold to talk';
-      case LivePttState.connecting:
-        statusText = 'Connecting...';
-      case LivePttState.requestingFloor:
-        statusText = 'Requesting...';
-      case LivePttState.broadcasting:
-        statusText = 'Broadcasting live';
-      case LivePttState.listening:
-        statusText = '${session.currentSpeakerName ?? "Someone"} is speaking';
-      case LivePttState.error:
-        statusText = session.errorMessage ?? 'Error';
-      case LivePttState.disconnected:
-        statusText = 'Disconnected - Tap to reconnect';
-    }
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
-      decoration: BoxDecoration(
-        color: AppColors.surfaceDark,
-        border: Border(top: BorderSide(color: AppColors.cardDark)),
-      ),
+    return Center(
       child: Column(
-        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
+          // Status indicator when someone is speaking
+          if (session.isListening)
+            Container(
+              margin: const EdgeInsets.only(bottom: 24),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.green.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.volume_up, color: Colors.green, size: 20),
+                  const SizedBox(width: 8),
+                  Text(
+                    '${session.currentSpeakerName ?? "Someone"} is speaking',
+                    style: const TextStyle(
+                      color: Colors.green,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+          // Large PTT button
+          LivePttButton(
+            channelId: channel.id,
+            size: 220,
+          ),
+
+          const SizedBox(height: 24),
+
           // Status text
           Text(
-            statusText,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: _getLiveStatusColor(session.state),
-                  fontWeight: session.isBroadcasting ? FontWeight.bold : FontWeight.normal,
-                ),
+            _getLiveStatusText(session),
+            style: TextStyle(
+              fontSize: 16,
+              color: _getLiveStatusColor(session.state),
+              fontWeight: session.isBroadcasting ? FontWeight.bold : FontWeight.normal,
+            ),
           ),
-          const SizedBox(height: 16),
-          // Live PTT Button
-          LivePttButton(channelId: channel.id),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLegacyFullPagePtt(ChannelModel channel) {
+    final session = ref.watch(pttSessionProvider(channel.id));
+
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          // Large PTT button
+          PttButton(
+            channelId: channel.id,
+            size: 220,
+          ),
+
+          const SizedBox(height: 24),
+
+          // Status text
+          Text(
+            _getLegacyStatusText(session),
+            style: TextStyle(
+              fontSize: 16,
+              color: session.isRecording ? Colors.red : Colors.grey,
+              fontWeight: session.isRecording ? FontWeight.bold : FontWeight.normal,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _getLiveStatusText(LivePttSessionState session) {
+    switch (session.state) {
+      case LivePttState.idle:
+        return 'Hold to talk';
+      case LivePttState.connecting:
+        return 'Connecting...';
+      case LivePttState.requestingFloor:
+        return 'Requesting...';
+      case LivePttState.broadcasting:
+        return 'Broadcasting live';
+      case LivePttState.listening:
+        return 'Listening...';
+      case LivePttState.error:
+        return session.errorMessage ?? 'Error';
+      case LivePttState.disconnected:
+        return 'Tap to reconnect';
+    }
+  }
+
+  String _getLegacyStatusText(PttSessionState session) {
+    switch (session.state) {
+      case PttState.idle:
+        return 'Hold to record';
+      case PttState.recording:
+        return 'Recording...';
+      case PttState.uploading:
+        return 'Sending...';
+      case PttState.error:
+        return session.errorMessage ?? 'Error';
+    }
+  }
+
+  Widget _buildBottomStatusBar(ChannelModel channel) {
+    final session = AppConstants.useLiveStreaming
+        ? ref.watch(livePttSessionProvider(channel.id))
+        : null;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          // Connection indicator
+          Icon(
+            Icons.wifi,
+            color: session?.isConnected ?? false ? AppColors.primary : Colors.grey,
+            size: 24,
+          ),
+          // Availability status
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.green.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: Colors.green,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                const Text(
+                  'Available',
+                  style: TextStyle(
+                    color: Colors.green,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Signal strength indicator
+          Icon(
+            Icons.signal_cellular_alt,
+            color: session?.isConnected ?? false ? AppColors.primary : Colors.grey,
+            size: 24,
+          ),
         ],
       ),
     );
@@ -481,7 +553,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
   Color _getLiveStatusColor(LivePttState state) {
     switch (state) {
       case LivePttState.idle:
-        return AppColors.textSecondaryDark;
+        return Colors.grey;
       case LivePttState.connecting:
       case LivePttState.requestingFloor:
         return Colors.orange;
@@ -493,5 +565,310 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
       case LivePttState.disconnected:
         return AppColors.error;
     }
+  }
+}
+
+// Action button widget
+class _ActionButton extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _ActionButton({
+    required this.icon,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.1),
+          shape: BoxShape.circle,
+        ),
+        child: Icon(icon, color: color, size: 24),
+      ),
+    );
+  }
+}
+
+// Message history bottom sheet
+class _MessageHistorySheet extends ConsumerWidget {
+  final String channelId;
+  final String channelName;
+  final Function(MessageModel) onPlayMessage;
+  final String? currentlyPlayingId;
+
+  const _MessageHistorySheet({
+    required this.channelId,
+    required this.channelName,
+    required this.onPlayMessage,
+    this.currentlyPlayingId,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final messagesAsync = ref.watch(channelMessagesProvider(channelId));
+    final currentUser = ref.read(authStateProvider).value;
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.9,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      builder: (context, scrollController) {
+        return Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: Column(
+            children: [
+              // Handle bar
+              Container(
+                margin: const EdgeInsets.only(top: 12),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              // Header
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                    // Channel avatar
+                    CircleAvatar(
+                      radius: 18,
+                      backgroundColor: AppColors.surfaceDark,
+                      child: Text(
+                        channelName.isNotEmpty ? channelName[0].toUpperCase() : 'C',
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          channelName,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                        const Text(
+                          'Available',
+                          style: TextStyle(
+                            color: Colors.green,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              // Messages list
+              Expanded(
+                child: messagesAsync.when(
+                  loading: () => const Center(child: CircularProgressIndicator()),
+                  error: (error, _) => Center(
+                    child: Text('Error: $error'),
+                  ),
+                  data: (messages) {
+                    if (messages.isEmpty) {
+                      return const Center(
+                        child: Text(
+                          'No messages yet',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      );
+                    }
+                    return ListView.builder(
+                      controller: scrollController,
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      itemCount: messages.length,
+                      itemBuilder: (context, index) {
+                        final message = messages[index];
+                        final isMe = message.senderId == currentUser?.uid;
+                        final isPlaying = currentlyPlayingId == message.id;
+
+                        return _buildMessageBubble(context, message, isMe, isPlaying);
+                      },
+                    );
+                  },
+                ),
+              ),
+              // Playback controls
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  border: Border(top: BorderSide(color: Colors.grey[200]!)),
+                ),
+                child: Row(
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.skip_previous),
+                      color: Colors.grey,
+                      onPressed: () {},
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.play_arrow),
+                      color: Colors.grey,
+                      onPressed: () {},
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.skip_next),
+                      color: Colors.grey,
+                      onPressed: () {},
+                    ),
+                    const Spacer(),
+                    const Text('1x', style: TextStyle(color: Colors.grey)),
+                  ],
+                ),
+              ),
+              // Input area
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  border: Border(top: BorderSide(color: Colors.grey[200]!)),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.grey[100],
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.add, color: Colors.grey),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        decoration: BoxDecoration(
+                          color: Colors.grey[100],
+                          borderRadius: BorderRadius.circular(24),
+                        ),
+                        child: const Text(
+                          'Message',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.withValues(alpha: 0.1),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.orange, width: 2),
+                      ),
+                      child: const Icon(Icons.mic, color: Colors.orange),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildMessageBubble(BuildContext context, MessageModel message, bool isMe, bool isPlaying) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        children: [
+          // Date separator (simplified)
+          if (message == message) // Placeholder for actual date logic
+            Container(),
+
+          Row(
+            mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+            children: [
+              GestureDetector(
+                onTap: () => onPlayMessage(message),
+                child: Container(
+                  constraints: BoxConstraints(
+                    maxWidth: MediaQuery.of(context).size.width * 0.7,
+                  ),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: isMe ? AppColors.primary : Colors.grey[200],
+                    borderRadius: BorderRadius.circular(20),
+                    border: isPlaying ? Border.all(color: AppColors.primary, width: 2) : null,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        isPlaying ? Icons.stop : Icons.play_arrow,
+                        color: isMe ? Colors.white : Colors.black54,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 8),
+                      // Waveform placeholder
+                      Flexible(
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: List.generate(15, (i) => Container(
+                            width: 2,
+                            height: (i % 3 + 1) * 4.0 + 4,
+                            margin: const EdgeInsets.symmetric(horizontal: 1),
+                            decoration: BoxDecoration(
+                              color: isMe ? Colors.white.withValues(alpha: 0.7) : Colors.black38,
+                              borderRadius: BorderRadius.circular(1),
+                            ),
+                          )),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '${(message.audioDuration ?? 0) ~/ 60}:${((message.audioDuration ?? 0) % 60).toString().padLeft(2, '0')}',
+                        style: TextStyle(
+                          color: isMe ? Colors.white : Colors.black87,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          // Time
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              _formatTime(message.timestamp),
+              style: TextStyle(
+                fontSize: 11,
+                color: Colors.grey[500],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatTime(DateTime? timestamp) {
+    if (timestamp == null) return '';
+    return DateFormat('h:mm a').format(timestamp);
   }
 }

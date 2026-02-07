@@ -8,10 +8,12 @@ import '../providers/ptt_providers.dart';
 
 class PttButton extends ConsumerStatefulWidget {
   final String channelId;
+  final double size;
 
   const PttButton({
     super.key,
     required this.channelId,
+    this.size = 120,
   });
 
   @override
@@ -126,37 +128,117 @@ class _PttButtonState extends ConsumerState<PttButton>
             child: child,
           );
         },
-        child: Container(
-          width: 120,
-          height: 120,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: _getButtonColor(session.state),
-            boxShadow: [
-              BoxShadow(
-                color: _getButtonColor(session.state).withValues(alpha: 0.4),
-                blurRadius: session.isRecording ? 30 : 15,
-                spreadRadius: session.isRecording ? 5 : 0,
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                _getIcon(session.state),
-                size: 48,
-                color: Colors.white,
-              ),
-              if (session.isRecording) ...[
-                const SizedBox(height: 4),
-                _buildRecordingIndicator(),
-              ],
-            ],
-          ),
-        ),
+        child: _buildPttButtonDesign(session),
       ),
     );
+  }
+
+  Widget _buildPttButtonDesign(PttSessionState session) {
+    final ringColor = _getRingColor(session.state);
+    final iconColor = _getIconColor(session.state);
+
+    return SizedBox(
+      width: widget.size,
+      height: widget.size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          // Outer subtle ring (light gray)
+          Container(
+            width: widget.size,
+            height: widget.size,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.grey[100],
+            ),
+          ),
+
+          // Orange/colored ring
+          Container(
+            width: widget.size * 0.85,
+            height: widget.size * 0.85,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: ringColor,
+                width: widget.size * 0.025,
+              ),
+            ),
+          ),
+
+          // White center with icon
+          Container(
+            width: widget.size * 0.7,
+            height: widget.size * 0.7,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.1),
+                  blurRadius: 10,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  _getIcon(session.state),
+                  size: widget.size * 0.25,
+                  color: iconColor,
+                ),
+                if (session.isRecording) ...[
+                  SizedBox(height: widget.size * 0.02),
+                  _buildRecordingIndicator(iconColor),
+                ],
+              ],
+            ),
+          ),
+
+          // Pulsing overlay when recording
+          if (session.isRecording)
+            Container(
+              width: widget.size * 0.85,
+              height: widget.size * 0.85,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: ringColor.withValues(alpha: 0.3),
+                  width: widget.size * 0.05,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Color _getRingColor(PttState state) {
+    switch (state) {
+      case PttState.idle:
+        return Colors.orange;
+      case PttState.recording:
+        return Colors.red;
+      case PttState.uploading:
+        return Colors.orange;
+      case PttState.error:
+        return Colors.red;
+    }
+  }
+
+  Color _getIconColor(PttState state) {
+    switch (state) {
+      case PttState.idle:
+        return AppColors.primary;
+      case PttState.recording:
+        return Colors.red;
+      case PttState.uploading:
+        return Colors.orange;
+      case PttState.error:
+        return Colors.red;
+    }
   }
 
   Color _getButtonColor(PttState state) {
@@ -185,12 +267,12 @@ class _PttButtonState extends ConsumerState<PttButton>
     }
   }
 
-  Widget _buildRecordingIndicator() {
+  Widget _buildRecordingIndicator([Color? color]) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: List.generate(
         5,
-        (index) => _AudioBar(delay: index * 100),
+        (index) => _AudioBar(delay: index * 100, color: color ?? Colors.white),
       ),
     );
   }
@@ -198,8 +280,9 @@ class _PttButtonState extends ConsumerState<PttButton>
 
 class _AudioBar extends StatefulWidget {
   final int delay;
+  final Color color;
 
-  const _AudioBar({required this.delay});
+  const _AudioBar({required this.delay, this.color = Colors.white});
 
   @override
   State<_AudioBar> createState() => _AudioBarState();
@@ -244,7 +327,7 @@ class _AudioBarState extends State<_AudioBar>
           height: _animation.value,
           margin: const EdgeInsets.symmetric(horizontal: 1),
           decoration: BoxDecoration(
-            color: Colors.white,
+            color: widget.color,
             borderRadius: BorderRadius.circular(2),
           ),
         );
