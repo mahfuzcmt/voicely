@@ -73,14 +73,32 @@ class LiveStreamingService {
   Stream<({String? id, String? name})> get currentSpeaker => _speakerController.stream;
   Stream<({int tracks, bool onTrack, String? ice})> get debugState => _debugController.stream;
 
+  // Mute state
+  bool _isMuted = false;
+
   // Getters
   LiveStreamingState get state => _state;
   bool get isBroadcasting => _isBroadcasting;
+  bool get isMuted => _isMuted;
   MediaStream? get localStream => _localStream;
   Map<String, MediaStream> get remoteStreams => Map.unmodifiable(_remoteStreams);
   int get audioTracksReceived => _audioTracksReceived;
   bool get onTrackFired => _onTrackFired;
   String? get iceState => _iceState;
+
+  /// Set muted state for incoming audio
+  void setMuted(bool muted) {
+    _isMuted = muted;
+    debugPrint('LiveStreaming: Setting muted to $muted');
+
+    // Mute/unmute all remote audio tracks
+    for (final stream in _remoteStreams.values) {
+      for (final track in stream.getAudioTracks()) {
+        track.enabled = !muted;
+        debugPrint('LiveStreaming: Audio track ${track.id} enabled: ${!muted}');
+      }
+    }
+  }
 
   LiveStreamingService({
     required this.channelId,

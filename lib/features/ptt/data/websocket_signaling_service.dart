@@ -293,8 +293,8 @@ class WebSocketSignalingService {
   Set<String> get joinedRooms => Set.unmodifiable(_joinedRooms);
 
   /// Connect to the signaling server
-  Future<bool> connect(String authToken) async {
-    debugPrint('WS: connect() called');
+  Future<bool> connect(String authToken, {String? displayName}) async {
+    debugPrint('WS: connect() called with displayName: $displayName');
 
     if (_connectionState == WSConnectionState.connecting ||
         _connectionState == WSConnectionState.authenticating) {
@@ -303,6 +303,7 @@ class WebSocketSignalingService {
     }
 
     _authToken = authToken;
+    _displayName = displayName;
     _updateState(WSConnectionState.connecting);
 
     final serverUrl = AppConstants.signalingServerUrl;
@@ -326,11 +327,12 @@ class WebSocketSignalingService {
         onDone: _handleDone,
       );
 
-      // Authenticate
+      // Authenticate - include displayName so server can broadcast it
       _updateState(WSConnectionState.authenticating);
       _send({
         'type': _messageTypeToString(WSMessageType.auth),
         'token': authToken,
+        if (displayName != null && displayName.isNotEmpty) 'displayName': displayName,
       });
 
       // Start heartbeat
@@ -695,7 +697,7 @@ class WebSocketSignalingService {
     _reconnectTimer = Timer(delay, () {
       _reconnectTimer = null;
       if (_authToken != null) {
-        connect(_authToken!);
+        connect(_authToken!, displayName: _displayName);
       }
     });
   }

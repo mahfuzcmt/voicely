@@ -8,13 +8,36 @@ import '../../../../di/providers.dart';
 import '../../domain/models/channel_model.dart';
 import '../widgets/channel_tile.dart';
 
-class ChannelsScreen extends ConsumerWidget {
+class ChannelsScreen extends ConsumerStatefulWidget {
   const ChannelsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ChannelsScreen> createState() => _ChannelsScreenState();
+}
+
+class _ChannelsScreenState extends ConsumerState<ChannelsScreen> {
+  bool _hasAutoNavigated = false;
+
+  @override
+  Widget build(BuildContext context) {
     final channelsAsync = ref.watch(userChannelsProvider);
     final userAsync = ref.watch(currentUserStreamProvider);
+
+    // Auto-navigate to channel if there's only one
+    channelsAsync.whenData((channels) {
+      if (channels.length == 1 && !_hasAutoNavigated) {
+        _hasAutoNavigated = true;
+        // Use addPostFrameCallback to navigate after build completes
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            context.goNamed(
+              'channelDetail',
+              pathParameters: {'channelId': channels.first.id},
+            );
+          }
+        });
+      }
+    });
 
     return Scaffold(
       appBar: AppBar(

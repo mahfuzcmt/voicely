@@ -45,6 +45,7 @@ class LivePttSessionState {
   final String? currentSpeakerName;
   final DateTime? floorExpiresAt;
   final WSConnectionState connectionState;
+  final bool isMuted;
   // Debug info
   final int audioTracksReceived;
   final bool onTrackFired;
@@ -58,6 +59,7 @@ class LivePttSessionState {
     this.currentSpeakerName,
     this.floorExpiresAt,
     this.connectionState = WSConnectionState.disconnected,
+    this.isMuted = false,
     this.audioTracksReceived = 0,
     this.onTrackFired = false,
     this.iceState,
@@ -71,6 +73,7 @@ class LivePttSessionState {
     String? currentSpeakerName,
     DateTime? floorExpiresAt,
     WSConnectionState? connectionState,
+    bool? isMuted,
     int? audioTracksReceived,
     bool? onTrackFired,
     String? iceState,
@@ -83,6 +86,7 @@ class LivePttSessionState {
       currentSpeakerName: currentSpeakerName,
       floorExpiresAt: floorExpiresAt,
       connectionState: connectionState ?? this.connectionState,
+      isMuted: isMuted ?? this.isMuted,
       audioTracksReceived: audioTracksReceived ?? this.audioTracksReceived,
       onTrackFired: onTrackFired ?? this.onTrackFired,
       iceState: iceState ?? this.iceState,
@@ -104,6 +108,16 @@ class LivePttSessionState {
     if (broadcastStartTime == null) return Duration.zero;
     return DateTime.now().difference(broadcastStartTime!);
   }
+
+  /// Remaining broadcast time before auto-stop (60 seconds max)
+  int get remainingBroadcastSeconds {
+    if (broadcastStartTime == null) return 60;
+    final elapsed = DateTime.now().difference(broadcastStartTime!).inSeconds;
+    return (60 - elapsed).clamp(0, 60);
+  }
+
+  /// Whether broadcast time is running low (less than 10 seconds)
+  bool get isBroadcastTimeWarning => remainingBroadcastSeconds <= 10 && isBroadcasting;
 }
 
 /// Provider for WebSocket connection state
@@ -165,8 +179,12 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
   StreamSubscription? _remoteStreamSubscription;
   StreamSubscription? _debugSubscription;
   Timer? _broadcastTimer;
+  Timer? _autoStopTimer;
   bool _wakelockEnabled = false;
   bool _backgroundServiceStarted = false;
+
+  /// Auto-stop broadcasting after 60 seconds to prevent accidental long broadcasts
+  static const int _maxBroadcastDurationSeconds = 60;
 
   LivePttSessionNotifier({
     required Ref ref,
@@ -390,8 +408,15 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       final token = await user.getIdToken();
       debugPrint('LivePTT: Got token, length: ${token?.length ?? 0}');
       if (token != null) {
-        debugPrint('LivePTT: Connecting to WebSocket...');
-        await _wsService.connect(token);
+        // Get display name from Firebase user or Firestore
+        String? displayName = user.displayName;
+        if (displayName == null || displayName.isEmpty) {
+          // Try to get from Firestore
+          final userModel = await _ref.read(currentUserProvider.future);
+          displayName = userModel?.displayName ?? userModel?.phoneNumber;
+        }
+        debugPrint('LivePTT: Connecting to WebSocket with displayName: $displayName');
+        await _wsService.connect(token, displayName: displayName);
       } else {
         debugPrint('LivePTT: Token is null!');
       }
@@ -449,6 +474,17 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
   Future<void> reconnect() async {
     if (_wsService.isConnected) return;
     await _autoConnect();
+  }
+
+  /// Toggle mute state for incoming audio
+  void toggleMute() {
+    final newMuteState = !state.isMuted;
+    state = state.copyWith(isMuted: newMuteState);
+
+    // Mute/unmute audio tracks in the streaming service
+    _streamingService.setMuted(newMuteState);
+
+    debugPrint('LivePTT: Mute toggled to $newMuteState');
   }
 
   /// Map connection state to PTT state
@@ -571,6 +607,8 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
   /// Start timer to track broadcast duration
   void _startBroadcastTimer() {
     _stopBroadcastTimer();
+
+    // Duration update timer (every second)
     _broadcastTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       // Trigger rebuild to update duration display
       state = state.copyWith(
@@ -578,12 +616,23 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
         broadcastStartTime: state.broadcastStartTime,
       );
     });
+
+    // Auto-stop timer after 60 seconds
+    _autoStopTimer = Timer(
+      const Duration(seconds: _maxBroadcastDurationSeconds),
+      () {
+        debugPrint('LivePTT: Auto-stopping broadcast after $_maxBroadcastDurationSeconds seconds');
+        stopBroadcasting();
+      },
+    );
   }
 
   /// Stop broadcast duration timer
   void _stopBroadcastTimer() {
     _broadcastTimer?.cancel();
     _broadcastTimer = null;
+    _autoStopTimer?.cancel();
+    _autoStopTimer = null;
   }
 
   /// Clear error state

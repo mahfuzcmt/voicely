@@ -180,16 +180,13 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
                 // User/Channel info section
                 _buildChannelInfo(channel),
 
-                // Action buttons (camera, emergency, notifications)
-                _buildActionButtons(),
+                // Action buttons (camera, emergency, mute)
+                _buildActionButtons(channel),
 
                 // Main PTT area - takes most of the space
                 Expanded(
                   child: _buildFullPagePttArea(channel),
                 ),
-
-                // Bottom status bar
-                _buildBottomStatusBar(channel),
               ],
             ),
           ),
@@ -221,7 +218,9 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
                 color: session.isBroadcasting
-                    ? Colors.red.withValues(alpha: 0.1)
+                    ? (session.isBroadcastTimeWarning
+                        ? Colors.red.withValues(alpha: 0.1)
+                        : Colors.orange.withValues(alpha: 0.1))
                     : Colors.green.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(20),
               ),
@@ -232,19 +231,23 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
                     width: 10,
                     height: 10,
                     decoration: BoxDecoration(
-                      color: session.isBroadcasting ? Colors.red : Colors.green,
+                      color: session.isBroadcasting
+                          ? (session.isBroadcastTimeWarning ? Colors.red : Colors.orange)
+                          : Colors.green,
                       shape: BoxShape.circle,
                     ),
                   ),
                   const SizedBox(width: 8),
                   Text(
                     session.isBroadcasting
-                        ? _formatDuration(session.broadcastDuration)
+                        ? 'LIVE ${_formatDuration(session.broadcastDuration)} (${session.remainingBroadcastSeconds}s)'
                         : (session.currentSpeakerName?.isNotEmpty == true)
                             ? session.currentSpeakerName!
                             : 'Listening...',
                     style: TextStyle(
-                      color: session.isBroadcasting ? Colors.red : Colors.green,
+                      color: session.isBroadcasting
+                          ? (session.isBroadcastTimeWarning ? Colors.red : Colors.orange)
+                          : Colors.green,
                       fontWeight: FontWeight.bold,
                       fontSize: 16,
                     ),
@@ -279,11 +282,14 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
         ? ref.watch(livePttSessionProvider(channel.id))
         : null;
 
-    // Watch online members count
+    // Watch online members count - exclude current user
+    final currentUser = ref.watch(authStateProvider).value;
     final membersAsync = AppConstants.useLiveStreaming
         ? ref.watch(liveRoomMembersProvider(channel.id))
         : null;
-    final onlineCount = membersAsync?.valueOrNull?.length ?? 0;
+    final members = membersAsync?.valueOrNull ?? [];
+    // Filter out current user from online count
+    final onlineCount = members.where((m) => m.userId != currentUser?.uid).length;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
@@ -337,35 +343,37 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
                 ),
                 Row(
                   children: [
-                    // Online users count
-                    if (onlineCount > 0) ...[
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: const BoxDecoration(
-                          color: Colors.green,
-                          shape: BoxShape.circle,
-                        ),
+                    // Connection status dot
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: (session?.isConnected ?? false)
+                            ? Colors.green
+                            : (session?.isConnecting ?? false)
+                                ? Colors.yellow[700]
+                                : Colors.grey,
+                        shape: BoxShape.circle,
                       ),
-                      const SizedBox(width: 4),
-                      Text(
-                        '$onlineCount online',
-                        style: const TextStyle(
-                          fontSize: 14,
-                          color: Colors.green,
-                          fontWeight: FontWeight.w500,
-                        ),
+                    ),
+                    const SizedBox(width: 4),
+                    // Show user count or connection status
+                    Text(
+                      (session?.isConnected ?? false)
+                          ? (onlineCount > 0 ? '$onlineCount online' : 'Available')
+                          : (session?.isConnecting ?? false)
+                              ? 'Connecting...'
+                              : 'Disconnected',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: (session?.isConnected ?? false)
+                            ? Colors.green
+                            : (session?.isConnecting ?? false)
+                                ? Colors.yellow[700]
+                                : Colors.grey,
+                        fontWeight: FontWeight.w500,
                       ),
-                    ] else
-                      Text(
-                        session?.isConnected ?? false ? 'Available' : 'Connecting...',
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: session?.isConnected ?? false
-                              ? Colors.green
-                              : Colors.orange,
-                        ),
-                      ),
+                    ),
                   ],
                 ),
               ],
@@ -383,21 +391,57 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
     );
   }
 
-  Widget _buildActionButtons() {
-    final autoPlayEnabled = ref.watch(autoPlayEnabledProvider);
+  Widget _buildActionButtons(ChannelModel channel) {
+    final session = AppConstants.useLiveStreaming
+        ? ref.watch(livePttSessionProvider(channel.id))
+        : null;
+    final isMuted = session?.isMuted ?? false;
+
+    // Get online users count (excluding current user)
+    final currentUser = ref.watch(authStateProvider).value;
+    final membersAsync = AppConstants.useLiveStreaming
+        ? ref.watch(liveRoomMembersProvider(channel.id))
+        : null;
+    final members = membersAsync?.valueOrNull ?? [];
+    final onlineCount = members.where((m) => m.userId != currentUser?.uid).length;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          // Camera button (placeholder)
+          // Mute button for live audio
           _ActionButton(
-            icon: Icons.camera_alt,
-            color: AppColors.primary,
+            icon: isMuted ? Icons.volume_off : Icons.volume_up,
+            color: isMuted ? Colors.red : AppColors.primary,
             onTap: () {
-              context.showSnackBar('Camera feature coming soon');
+              ref.read(livePttSessionProvider(channel.id).notifier).toggleMute();
+              context.showSnackBar(
+                isMuted ? 'Audio unmuted' : 'Audio muted',
+              );
             },
+          ),
+          // Online users count in the middle
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.green.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.people, color: Colors.green, size: 18),
+                const SizedBox(width: 6),
+                Text(
+                  '$onlineCount online',
+                  style: const TextStyle(
+                    color: Colors.green,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
           ),
           // Emergency button
           Container(
@@ -429,17 +473,6 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
                 ),
               ],
             ),
-          ),
-          // Auto-play/notification button
-          _ActionButton(
-            icon: autoPlayEnabled ? Icons.notifications_active : Icons.notifications_off,
-            color: autoPlayEnabled ? AppColors.primary : Colors.grey,
-            onTap: () {
-              ref.read(autoPlayEnabledProvider.notifier).state = !autoPlayEnabled;
-              context.showSnackBar(
-                autoPlayEnabled ? 'Auto-play disabled' : 'Auto-play enabled',
-              );
-            },
           ),
         ],
       ),
@@ -507,61 +540,6 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
       case PttState.error:
         return session.errorMessage ?? 'Error';
     }
-  }
-
-  Widget _buildBottomStatusBar(ChannelModel channel) {
-    final session = AppConstants.useLiveStreaming
-        ? ref.watch(livePttSessionProvider(channel.id))
-        : null;
-
-    // Watch online members count
-    final membersAsync = AppConstants.useLiveStreaming
-        ? ref.watch(liveRoomMembersProvider(channel.id))
-        : null;
-    final onlineCount = membersAsync?.valueOrNull?.length ?? 0;
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          // Connection indicator
-          Icon(
-            Icons.wifi,
-            color: session?.isConnected ?? false ? AppColors.primary : Colors.grey,
-            size: 24,
-          ),
-          // Online users indicator
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.green.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.people, color: Colors.green, size: 18),
-                const SizedBox(width: 6),
-                Text(
-                  onlineCount > 0 ? '$onlineCount listening' : 'Ready',
-                  style: const TextStyle(
-                    color: Colors.green,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          // Signal strength indicator
-          Icon(
-            Icons.signal_cellular_alt,
-            color: session?.isConnected ?? false ? AppColors.primary : Colors.grey,
-            size: 24,
-          ),
-        ],
-      ),
-    );
   }
 
   Color _getLiveStatusColor(LivePttState state) {

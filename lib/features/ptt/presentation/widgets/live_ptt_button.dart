@@ -45,9 +45,23 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
     super.dispose();
   }
 
-  void _onPressStart() async {
+  /// Toggle broadcasting on tap - tap to start, tap again to stop
+  void _onTapToggle() async {
     final session = ref.read(livePttSessionProvider(widget.channelId));
 
+    // If currently broadcasting or requesting floor, stop
+    if (session.isBroadcasting || session.state == LivePttState.requestingFloor) {
+      HapticFeedback.lightImpact();
+      _pulseController.stop();
+      _pulseController.reset();
+
+      await ref
+          .read(livePttSessionProvider(widget.channelId).notifier)
+          .stopBroadcasting();
+      return;
+    }
+
+    // Check if can broadcast
     if (!session.canBroadcast) {
       if (session.state == LivePttState.error) {
         ref.read(livePttSessionProvider(widget.channelId).notifier).clearError();
@@ -65,6 +79,7 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
       return;
     }
 
+    // Start broadcasting
     HapticFeedback.heavyImpact();
     _pulseController.repeat(reverse: true);
 
@@ -84,22 +99,6 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
     }
   }
 
-  void _onPressEnd() async {
-    final session = ref.read(livePttSessionProvider(widget.channelId));
-
-    if (!session.isBroadcasting && session.state != LivePttState.requestingFloor) {
-      return;
-    }
-
-    HapticFeedback.lightImpact();
-    _pulseController.stop();
-    _pulseController.reset();
-
-    await ref
-        .read(livePttSessionProvider(widget.channelId).notifier)
-        .stopBroadcasting();
-  }
-
   @override
   Widget build(BuildContext context) {
     final session = ref.watch(livePttSessionProvider(widget.channelId));
@@ -115,29 +114,15 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Connection status indicator
-        _buildStatusIndicator(session),
-        const SizedBox(height: 8),
-
-        // Current speaker display
+        // Current speaker display (when listening)
         if (session.isListening) ...[
           _buildSpeakerIndicator(session),
           const SizedBox(height: 8),
         ],
 
-        // Main PTT button with new design
+        // Main PTT button with new design - tap to toggle
         GestureDetector(
-          onTapDown: (_) => _onPressStart(),
-          onTapUp: (_) => _onPressEnd(),
-          onTapCancel: () {
-            if (session.isBroadcasting || session.state == LivePttState.requestingFloor) {
-              ref
-                  .read(livePttSessionProvider(widget.channelId).notifier)
-                  .cancelBroadcasting();
-              _pulseController.stop();
-              _pulseController.reset();
-            }
-          },
+          onTap: _onTapToggle,
           child: AnimatedBuilder(
             animation: _pulseAnimation,
             builder: (context, child) {
@@ -149,12 +134,6 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
             child: _buildPttButtonDesign(session),
           ),
         ),
-
-        // Broadcast duration
-        if (session.isBroadcasting) ...[
-          const SizedBox(height: 8),
-          _buildDurationDisplay(session),
-        ],
       ],
     );
   }
@@ -194,7 +173,7 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
             ),
           ),
 
-          // White center with icon
+          // White center with icon and text
           Container(
             width: widget.size * 0.7,
             height: widget.size * 0.7,
@@ -214,21 +193,58 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
               children: [
                 Icon(
                   _getIcon(session),
-                  size: widget.size * 0.25,
+                  size: widget.size * 0.2,
                   color: iconColor,
                 ),
+                SizedBox(height: widget.size * 0.02),
+                // Text inside button based on state
                 if (session.isBroadcasting) ...[
+                  _buildRecordingIndicator(session.isBroadcastTimeWarning ? Colors.red : iconColor),
                   SizedBox(height: widget.size * 0.02),
-                  _buildRecordingIndicator(iconColor),
-                ],
-                if (session.state == LivePttState.requestingFloor) ...[
-                  SizedBox(height: widget.size * 0.02),
+                  Text(
+                    session.isBroadcastTimeWarning
+                        ? '${session.remainingBroadcastSeconds}s'
+                        : 'Tap to stop',
+                    style: TextStyle(
+                      fontSize: widget.size * 0.055,
+                      color: session.isBroadcastTimeWarning ? Colors.red : Colors.orange[700],
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ] else if (session.state == LivePttState.requestingFloor) ...[
                   SizedBox(
-                    width: widget.size * 0.12,
-                    height: widget.size * 0.12,
+                    width: widget.size * 0.1,
+                    height: widget.size * 0.1,
                     child: CircularProgressIndicator(
                       strokeWidth: 2,
                       valueColor: AlwaysStoppedAnimation<Color>(iconColor),
+                    ),
+                  ),
+                ] else if (session.isListening) ...[
+                  Text(
+                    'Listening',
+                    style: TextStyle(
+                      fontSize: widget.size * 0.055,
+                      color: Colors.green,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ] else if (session.canBroadcast) ...[
+                  Text(
+                    'Tap to speak',
+                    style: TextStyle(
+                      fontSize: widget.size * 0.055,
+                      color: Colors.grey[600],
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ] else if (!session.isConnected) ...[
+                  Text(
+                    'Reconnect',
+                    style: TextStyle(
+                      fontSize: widget.size * 0.055,
+                      color: Colors.grey[500],
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ],
@@ -262,7 +278,8 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
       case LivePttState.requestingFloor:
         return Colors.orange;
       case LivePttState.broadcasting:
-        return Colors.red;
+        // Red when time is running low, orange otherwise
+        return session.isBroadcastTimeWarning ? Colors.red : Colors.orange;
       case LivePttState.listening:
         return Colors.green;
       case LivePttState.error:
@@ -280,7 +297,8 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
       case LivePttState.requestingFloor:
         return Colors.orange;
       case LivePttState.broadcasting:
-        return Colors.red;
+        // Red when time is running low, orange otherwise
+        return session.isBroadcastTimeWarning ? Colors.red : Colors.orange;
       case LivePttState.listening:
         return Colors.green;
       case LivePttState.error:
@@ -388,7 +406,7 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       decoration: BoxDecoration(
-        color: Colors.red.withValues(alpha: 0.1),
+        color: Colors.orange.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
@@ -399,7 +417,7 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
             height: 8,
             decoration: const BoxDecoration(
               shape: BoxShape.circle,
-              color: Colors.red,
+              color: Colors.orange,
             ),
           ),
           const SizedBox(width: 6),
@@ -407,7 +425,7 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
             'LIVE $timeStr',
             style: const TextStyle(
               fontSize: 12,
-              color: Colors.red,
+              color: Colors.orange,
               fontWeight: FontWeight.bold,
             ),
           ),
@@ -442,7 +460,7 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
       case LivePttState.requestingFloor:
         return Icons.mic;
       case LivePttState.broadcasting:
-        return Icons.mic;
+        return Icons.stop;  // Show stop icon when broadcasting (tap to stop)
       case LivePttState.listening:
         return Icons.volume_up;
       case LivePttState.error:
