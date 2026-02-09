@@ -235,6 +235,9 @@ export interface AuthenticatedWebSocket extends WebSocket {
   photoUrl?: string;
   isAlive?: boolean;
   rooms?: Set<string>;
+  // Rate limiting
+  messageCount?: number;
+  lastMessageTime?: number;
 }
 
 // Room state

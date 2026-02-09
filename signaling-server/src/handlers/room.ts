@@ -9,6 +9,9 @@ import {
   RoomMembersMessage,
 } from '../types';
 
+// Max connections per room (from env or default)
+const MAX_CONNECTIONS_PER_ROOM = parseInt(process.env.MAX_CONNECTIONS_PER_ROOM || '50', 10);
+
 /**
  * Handle user joining a room
  */
@@ -20,6 +23,23 @@ export function handleJoinRoom(
 ): void {
   const userId = ws.userId!;
   const displayName = ws.displayName || 'Unknown';
+
+  // Check room capacity before joining
+  const existingRoom = roomManager.getRoom(roomId);
+  if (existingRoom && existingRoom.members.size >= MAX_CONNECTIONS_PER_ROOM) {
+    // Room is full
+    const errorMessage = {
+      type: 'error',
+      code: 'ROOM_FULL',
+      message: `Room is at capacity (${MAX_CONNECTIONS_PER_ROOM} members)`,
+      timestamp: Date.now(),
+    };
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify(errorMessage));
+    }
+    console.log(`User ${userId} rejected from room ${roomId} - room full`);
+    return;
+  }
 
   // Add user to room
   const members = roomManager.joinRoom(roomId, ws);

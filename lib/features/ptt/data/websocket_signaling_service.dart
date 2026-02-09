@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -261,12 +262,17 @@ class WebSocketSignalingService {
 
   int _reconnectAttempts = 0;
   static const int _maxReconnectAttempts = 5;
-  static const Duration _heartbeatInterval = Duration(seconds: 25);
+  static const Duration _heartbeatInterval = Duration(seconds: 15);
   static const Duration _initialReconnectDelay = Duration(seconds: 1);
+
+  // Auth completion tracking
+  Completer<bool>? _authCompleter;
 
   // State
   WSConnectionState _connectionState = WSConnectionState.disconnected;
   final Set<String> _joinedRooms = {};
+  // Track members per room for real-time updates
+  final Map<String, List<WSRoomMember>> _roomMembers = {};
 
   // Stream controllers
   final _connectionStateController = StreamController<WSConnectionState>.broadcast();
@@ -292,6 +298,10 @@ class WebSocketSignalingService {
   String? get userId => _userId;
   Set<String> get joinedRooms => Set.unmodifiable(_joinedRooms);
 
+  /// Connection timeout duration
+  static const Duration _connectionTimeout = Duration(seconds: 15);
+  static const Duration _authTimeout = Duration(seconds: 10);
+
   /// Connect to the signaling server
   Future<bool> connect(String authToken, {String? displayName}) async {
     debugPrint('WS: connect() called with displayName: $displayName');
@@ -313,9 +323,14 @@ class WebSocketSignalingService {
       final uri = Uri.parse(serverUrl);
       _channel = WebSocketChannel.connect(uri);
 
-      debugPrint('WS: Waiting for ready...');
-      // Wait for connection
-      await _channel!.ready;
+      debugPrint('WS: Waiting for ready (timeout: ${_connectionTimeout.inSeconds}s)...');
+      // Wait for connection with timeout
+      await _channel!.ready.timeout(
+        _connectionTimeout,
+        onTimeout: () {
+          throw TimeoutException('WebSocket connection timed out', _connectionTimeout);
+        },
+      );
 
       debugPrint('WS: Connected!');
       _updateState(WSConnectionState.connected);
@@ -329,15 +344,37 @@ class WebSocketSignalingService {
 
       // Authenticate - include displayName so server can broadcast it
       _updateState(WSConnectionState.authenticating);
+
+      // Create completer for auth result
+      _authCompleter = Completer<bool>();
+
       _send({
         'type': _messageTypeToString(WSMessageType.auth),
         'token': authToken,
         if (displayName != null && displayName.isNotEmpty) 'displayName': displayName,
       });
 
-      // Start heartbeat
+      // Wait for auth result with timeout
+      debugPrint('WS: Waiting for auth (timeout: ${_authTimeout.inSeconds}s)...');
+      final authResult = await _authCompleter!.future.timeout(
+        _authTimeout,
+        onTimeout: () {
+          debugPrint('WS: Auth timed out');
+          _authCompleter = null;
+          throw TimeoutException('Authentication timed out', _authTimeout);
+        },
+      );
+      _authCompleter = null;
+
+      if (!authResult) {
+        debugPrint('WS: Auth failed');
+        return false;
+      }
+
+      // Start heartbeat after successful auth
       _startHeartbeat();
 
+      debugPrint('WS: Connection and auth successful');
       return true;
     } catch (e) {
       Logger.e('WebSocket connection failed', error: e);
@@ -359,6 +396,7 @@ class WebSocketSignalingService {
     _channel = null;
 
     _joinedRooms.clear();
+    _roomMembers.clear();
     _updateState(WSConnectionState.disconnected);
 
     Logger.d('WebSocket disconnected');
@@ -387,6 +425,7 @@ class WebSocketSignalingService {
     });
 
     _joinedRooms.remove(roomId);
+    _roomMembers.remove(roomId);
   }
 
   /// Request floor control (permission to speak)
@@ -496,6 +535,11 @@ class WebSocketSignalingService {
           _updateState(WSConnectionState.authenticated);
           Logger.d('WebSocket authenticated as $_userId');
 
+          // Complete auth completer if waiting
+          if (_authCompleter != null && !_authCompleter!.isCompleted) {
+            _authCompleter!.complete(true);
+          }
+
           // Rejoin rooms after reconnect
           for (final roomId in _joinedRooms.toList()) {
             joinRoom(roomId);
@@ -505,6 +549,12 @@ class WebSocketSignalingService {
         case WSMessageType.authFailed:
           Logger.e('WebSocket auth failed: ${json['reason']}');
           _updateState(WSConnectionState.error);
+
+          // Complete auth completer with failure
+          if (_authCompleter != null && !_authCompleter!.isCompleted) {
+            _authCompleter!.complete(false);
+          }
+
           disconnect();
           break;
 
@@ -519,6 +569,7 @@ class WebSocketSignalingService {
           final members = (json['members'] as List?)
               ?.map((m) => WSRoomMember.fromJson(m as Map<String, dynamic>))
               .toList() ?? [];
+          _roomMembers[roomId] = members;
           _roomMembersController.add((roomId: roomId, members: members));
 
           final floorData = json['floorState'] as Map<String, dynamic>?;
@@ -527,9 +578,40 @@ class WebSocketSignalingService {
           break;
 
         case WSMessageType.memberJoined:
+          final roomId = json['roomId'] as String;
+          final memberData = json['member'] as Map<String, dynamic>;
+          final newMember = WSRoomMember.fromJson(memberData);
+
+          // Add new member to the list
+          final currentMembers = _roomMembers[roomId] ?? [];
+          if (!currentMembers.any((m) => m.userId == newMember.userId)) {
+            currentMembers.add(newMember);
+            _roomMembers[roomId] = currentMembers;
+          }
+          _roomMembersController.add((roomId: roomId, members: List.from(currentMembers)));
+          debugPrint('WS: Member joined $roomId: ${newMember.displayName}, total: ${currentMembers.length}');
+          break;
+
         case WSMessageType.memberLeft:
+          final roomId = json['roomId'] as String;
+          final leftUserId = json['userId'] as String;
+
+          // Remove member from the list
+          final currentMembers = _roomMembers[roomId] ?? [];
+          currentMembers.removeWhere((m) => m.userId == leftUserId);
+          _roomMembers[roomId] = currentMembers;
+          _roomMembersController.add((roomId: roomId, members: List.from(currentMembers)));
+          debugPrint('WS: Member left $roomId: $leftUserId, remaining: ${currentMembers.length}');
+          break;
+
         case WSMessageType.roomMembers:
-          // Room membership changes handled by caller
+          final roomId = json['roomId'] as String;
+          final members = (json['members'] as List?)
+              ?.map((m) => WSRoomMember.fromJson(m as Map<String, dynamic>))
+              .toList() ?? [];
+          _roomMembers[roomId] = members;
+          _roomMembersController.add((roomId: roomId, members: members));
+          debugPrint('WS: Room members updated $roomId: ${members.length}');
           break;
 
         case WSMessageType.floorGranted:

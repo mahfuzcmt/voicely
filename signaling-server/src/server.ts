@@ -17,8 +17,12 @@ import { AuthenticatedWebSocket, MessageType, ErrorMessage } from './types';
 
 // Configuration
 const PORT = parseInt(process.env.PORT || '8080', 10);
-const HEARTBEAT_INTERVAL = parseInt(process.env.WS_HEARTBEAT_INTERVAL || '30000', 10);
-const CONNECTION_TIMEOUT = parseInt(process.env.WS_CONNECTION_TIMEOUT || '60000', 10);
+const HEARTBEAT_INTERVAL = parseInt(process.env.WS_HEARTBEAT_INTERVAL || '15000', 10); // Reduced from 30s for faster dead connection detection
+const CONNECTION_TIMEOUT = parseInt(process.env.WS_CONNECTION_TIMEOUT || '30000', 10); // Reduced from 60s
+const MAX_CONNECTIONS_PER_ROOM = parseInt(process.env.MAX_CONNECTIONS_PER_ROOM || '50', 10);
+const MAX_TOTAL_CONNECTIONS = parseInt(process.env.MAX_TOTAL_CONNECTIONS || '500', 10);
+const MESSAGE_RATE_LIMIT = parseInt(process.env.MESSAGE_RATE_LIMIT || '100', 10); // messages per second
+const MESSAGE_RATE_WINDOW = 1000; // 1 second window
 
 // Services
 const roomManager = new RoomManager();
@@ -75,15 +79,33 @@ function heartbeat(ws: AuthenticatedWebSocket): void {
   ws.isAlive = true;
 }
 
+// Track consecutive missed heartbeats for graceful degradation
+const missedHeartbeats = new WeakMap<WebSocket, number>();
+
 // Ping all connections periodically
 const pingInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
     const authWs = ws as AuthenticatedWebSocket;
+    const missed = missedHeartbeats.get(ws) || 0;
+
     if (authWs.isAlive === false) {
-      console.log(`Terminating dead connection: ${authWs.userId}`);
-      handleDisconnect(roomManager, floorController, authWs);
-      return ws.terminate();
+      // Increment missed heartbeat counter
+      missedHeartbeats.set(ws, missed + 1);
+
+      // Allow 2 missed heartbeats before terminating (handles brief network glitches)
+      if (missed >= 2) {
+        console.log(`Terminating dead connection: ${authWs.userId} (missed ${missed + 1} heartbeats)`);
+        handleDisconnect(roomManager, floorController, authWs);
+        missedHeartbeats.delete(ws);
+        return ws.terminate();
+      } else {
+        console.log(`Warning: ${authWs.userId} missed heartbeat (${missed + 1}/3)`);
+      }
+    } else {
+      // Reset counter on successful pong
+      missedHeartbeats.set(ws, 0);
     }
+
     authWs.isAlive = false;
     ws.ping();
   });
@@ -93,12 +115,50 @@ wss.on('close', () => {
   clearInterval(pingInterval);
 });
 
+// Rate limiter state per connection
+interface RateLimiterState {
+  messageCount: number;
+  windowStart: number;
+}
+const rateLimiters = new WeakMap<WebSocket, RateLimiterState>();
+
+/**
+ * Check if a message should be rate limited
+ */
+function checkRateLimit(ws: WebSocket): boolean {
+  const now = Date.now();
+  let state = rateLimiters.get(ws);
+
+  if (!state) {
+    state = { messageCount: 0, windowStart: now };
+    rateLimiters.set(ws, state);
+  }
+
+  // Reset window if expired
+  if (now - state.windowStart >= MESSAGE_RATE_WINDOW) {
+    state.messageCount = 0;
+    state.windowStart = now;
+  }
+
+  state.messageCount++;
+  return state.messageCount > MESSAGE_RATE_LIMIT;
+}
+
 // Handle new WebSocket connections
 wss.on('connection', (ws: WebSocket) => {
+  // Check total connection limit
+  if (wss.clients.size > MAX_TOTAL_CONNECTIONS) {
+    console.log(`Connection rejected: max total connections (${MAX_TOTAL_CONNECTIONS}) reached`);
+    ws.close(4003, 'Server at capacity');
+    return;
+  }
+
   const authWs = ws as AuthenticatedWebSocket;
   authWs.isAlive = true;
+  authWs.messageCount = 0;
+  authWs.lastMessageTime = Date.now();
 
-  console.log('New WebSocket connection');
+  console.log(`New WebSocket connection (total: ${wss.clients.size})`);
 
   // Set connection timeout for authentication
   const authTimeout = setTimeout(() => {
@@ -113,6 +173,12 @@ wss.on('connection', (ws: WebSocket) => {
 
   // Handle incoming messages
   ws.on('message', async (data: Buffer) => {
+    // Rate limiting check
+    if (checkRateLimit(ws)) {
+      sendError(authWs, 'RATE_LIMITED', 'Too many messages, please slow down');
+      return;
+    }
+
     let message;
     try {
       message = JSON.parse(data.toString());
@@ -123,7 +189,7 @@ wss.on('connection', (ws: WebSocket) => {
 
     // Handle authentication (must be first message)
     if (message.type === MessageType.AUTH) {
-      const success = await handleAuth(authWs, message.token);
+      const success = await handleAuth(authWs, message.token, message.displayName);
       if (success) {
         clearTimeout(authTimeout);
       } else {
