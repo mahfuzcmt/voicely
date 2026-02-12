@@ -148,6 +148,7 @@ class LiveStreamingService {
     if (_localStream != null) return true;
 
     try {
+      // Try with full audio constraints first
       final constraints = {
         'audio': {
           'echoCancellation': true,
@@ -158,9 +159,21 @@ class LiveStreamingService {
         'video': false,
       };
 
-      _localStream = await navigator.mediaDevices.getUserMedia(constraints);
-      Logger.d('Local audio stream initialized');
-      return true;
+      try {
+        _localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        Logger.d('Local audio stream initialized with full constraints');
+        return true;
+      } catch (e) {
+        // Fallback to simpler constraints if device doesn't support all options
+        Logger.w('Full audio constraints failed, trying fallback: $e');
+        final fallbackConstraints = {
+          'audio': true,
+          'video': false,
+        };
+        _localStream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+        Logger.d('Local audio stream initialized with fallback constraints');
+        return true;
+      }
     } catch (e) {
       Logger.e('Failed to initialize local stream', error: e);
       _updateState(LiveStreamingState.error);
@@ -177,13 +190,30 @@ class LiveStreamingService {
 
     _updateState(LiveStreamingState.connecting);
 
-    // Initialize local stream if needed
+    // CRITICAL: Initialize local stream FIRST before anything else
+    // This ensures audio is ready when floor is granted
     if (_localStream == null) {
+      debugPrint('LiveStream: Initializing local stream before floor request');
       final success = await initLocalStream();
-      if (!success) return false;
+      if (!success) {
+        debugPrint('LiveStream: Failed to initialize local stream');
+        _updateState(LiveStreamingState.error);
+        return false;
+      }
+      debugPrint('LiveStream: Local stream ready with ${_localStream!.getTracks().length} tracks');
     }
 
-    // Request floor from server
+    // Verify we have audio tracks
+    final audioTracks = _localStream!.getAudioTracks();
+    if (audioTracks.isEmpty) {
+      Logger.e('No audio tracks in local stream');
+      _updateState(LiveStreamingState.error);
+      return false;
+    }
+    debugPrint('LiveStream: Audio tracks ready: ${audioTracks.length}');
+
+    // Now request floor from server
+    debugPrint('LiveStream: Requesting floor');
     _wsService.requestFloor(channelId);
 
     // Wait for floor granted (handled in _handleFloorStateChange)
@@ -271,46 +301,77 @@ class LiveStreamingService {
   Future<void> _startStreamingToListeners() async {
     if (_localStream == null) {
       debugPrint('LiveStream: Cannot stream - no local stream');
+      Logger.e('Cannot stream - local stream is null');
       return;
+    }
+
+    // Verify audio tracks exist and are enabled
+    final audioTracks = _localStream!.getAudioTracks();
+    if (audioTracks.isEmpty) {
+      debugPrint('LiveStream: Cannot stream - no audio tracks');
+      Logger.e('Cannot stream - no audio tracks in local stream');
+      return;
+    }
+
+    // Ensure tracks are enabled
+    for (final track in audioTracks) {
+      if (!track.enabled) {
+        track.enabled = true;
+        debugPrint('LiveStream: Enabled audio track ${track.id}');
+      }
     }
 
     debugPrint('LiveStream: Starting to stream to listeners');
     debugPrint('LiveStream: Local stream tracks: ${_localStream!.getTracks().length}');
+    debugPrint('LiveStream: Audio tracks enabled: ${audioTracks.where((t) => t.enabled).length}/${audioTracks.length}');
 
     // Close any old peer connections
     await _closeAllPeerConnections();
     _pendingOffersSent.clear();
 
-    // Create a broadcast offer SDP template (without creating a real connection)
-    // This will be used to notify listeners of our capabilities
-    final templatePc = await createPeerConnection({
-      'iceServers': AppConstants.iceServers,
-      'sdpSemantics': 'unified-plan',
-    });
+    try {
+      // Create a broadcast offer SDP template (without creating a real connection)
+      // This will be used to notify listeners of our capabilities
+      final templatePc = await createPeerConnection({
+        'iceServers': AppConstants.iceServers,
+        'sdpSemantics': 'unified-plan',
+      });
 
-    if (_localStream != null) {
+      // Add tracks to template PC
       for (final track in _localStream!.getTracks()) {
         await templatePc.addTrack(track, _localStream!);
+        debugPrint('LiveStream: Added track ${track.kind} to template PC');
       }
+
+      final offer = await templatePc.createOffer({
+        'offerToReceiveAudio': false,
+        'offerToReceiveVideo': false,
+      });
+
+      if (offer.sdp == null || offer.sdp!.isEmpty) {
+        debugPrint('LiveStream: Failed to create offer - empty SDP');
+        Logger.e('Failed to create offer - empty SDP');
+        await templatePc.close();
+        return;
+      }
+
+      // Constrain bandwidth for better multi-device performance
+      _broadcastOfferSdp = _constrainAudioBandwidth(offer.sdp!);
+
+      // Close template - we don't need it for actual connections
+      await templatePc.close();
+
+      debugPrint('LiveStream: Sending broadcast offer, sdp length: ${_broadcastOfferSdp?.length}');
+
+      // Broadcast the offer to all listeners
+      _wsService.sendOffer(
+        roomId: channelId,
+        sdp: _broadcastOfferSdp!,
+      );
+    } catch (e) {
+      debugPrint('LiveStream: Error creating/sending broadcast offer: $e');
+      Logger.e('Error creating broadcast offer', error: e);
     }
-
-    final offer = await templatePc.createOffer({
-      'offerToReceiveAudio': false,
-      'offerToReceiveVideo': false,
-    });
-    // Constrain bandwidth for better multi-device performance
-    _broadcastOfferSdp = _constrainAudioBandwidth(offer.sdp!);
-
-    // Close template - we don't need it for actual connections
-    await templatePc.close();
-
-    debugPrint('LiveStream: Sending broadcast offer, sdp length: ${_broadcastOfferSdp?.length}');
-
-    // Broadcast the offer to all listeners
-    _wsService.sendOffer(
-      roomId: channelId,
-      sdp: _broadcastOfferSdp!,
-    );
   }
 
   /// Handle incoming offer (when someone starts speaking)
@@ -324,6 +385,12 @@ class LiveStreamingService {
     debugPrint('LiveStream: Received offer from $fromUserId, sdp length: ${sdp.length}');
 
     try {
+      // CRITICAL: Close any existing PC for this user first to avoid ICE conflicts
+      if (_peerConnections.containsKey(fromUserId)) {
+        debugPrint('LiveStream: Closing existing PC for $fromUserId before creating new one');
+        await _closePeerConnection(fromUserId);
+      }
+
       // CRITICAL: Configure audio for playback BEFORE creating peer connection
       debugPrint('LiveStream: Configuring audio for receiving');
       await _configureAudioForReceiving();
@@ -335,10 +402,16 @@ class LiveStreamingService {
 
       // Add transceiver to receive audio (important for mobile!)
       debugPrint('LiveStream: Adding audio transceiver for receiving');
-      await pc.addTransceiver(
-        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-        init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-      );
+      try {
+        await pc.addTransceiver(
+          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+        );
+        debugPrint('LiveStream: Audio transceiver added successfully');
+      } catch (e) {
+        debugPrint('LiveStream: Failed to add transceiver (may be ok on some devices): $e');
+        // Continue anyway - some devices handle this automatically
+      }
 
       // Set remote description
       debugPrint('LiveStream: Setting remote description');
@@ -525,7 +598,7 @@ class LiveStreamingService {
       'iceServers': AppConstants.iceServers,
       'sdpSemantics': 'unified-plan',
       'iceCandidatePoolSize': 10,
-      'iceTransportPolicy': 'all', // Try all ICE candidates (host, srflx, relay)
+      'iceTransportPolicy': 'relay', // Force TURN relay only
       'bundlePolicy': 'max-bundle', // Bundle all media for efficiency
       'rtcpMuxPolicy': 'require', // Require RTCP multiplexing
     };
@@ -738,22 +811,46 @@ class LiveStreamingService {
     final peerCandidates = _peerIceCandidates[targetUserId];
     if (peerCandidates == null || peerCandidates.isEmpty) return;
 
-    final candidates = peerCandidates.map((c) => {
-      'candidate': c.candidate!,
-      'sdpMid': c.sdpMid!,
-      'sdpMLineIndex': c.sdpMLineIndex!,
-    }).toList();
+    // Filter out candidates with null/empty values to prevent crashes
+    final validCandidates = <Map<String, dynamic>>[];
+    for (final c in peerCandidates) {
+      // Skip candidates with null or empty required fields
+      if (c.candidate == null || c.candidate!.isEmpty) {
+        debugPrint('LiveStream: Skipping ICE candidate with null/empty candidate string');
+        continue;
+      }
+      if (c.sdpMid == null) {
+        debugPrint('LiveStream: Skipping ICE candidate with null sdpMid');
+        continue;
+      }
+      if (c.sdpMLineIndex == null || c.sdpMLineIndex! < 0) {
+        debugPrint('LiveStream: Skipping ICE candidate with invalid sdpMLineIndex');
+        continue;
+      }
+      validCandidates.add({
+        'candidate': c.candidate!,
+        'sdpMid': c.sdpMid!,
+        'sdpMLineIndex': c.sdpMLineIndex!,
+      });
+    }
+
+    if (validCandidates.isEmpty) {
+      debugPrint('LiveStream: No valid ICE candidates to send to $targetUserId');
+      peerCandidates.clear();
+      _peerIceBatchTimers.remove(targetUserId);
+      return;
+    }
 
     // Always send to specific target user for better multi-device performance
     _wsService.sendIceCandidatesBatch(
       roomId: channelId,
-      candidates: candidates,
+      candidates: validCandidates,
       targetUserId: targetUserId,
     );
 
     peerCandidates.clear();
     _peerIceBatchTimers.remove(targetUserId);
-    Logger.d('Sent ${candidates.length} ICE candidates to $targetUserId');
+    Logger.d('Sent ${validCandidates.length} ICE candidates to $targetUserId');
   }
 
   /// Configure audio session and routing for receiving WebRTC audio

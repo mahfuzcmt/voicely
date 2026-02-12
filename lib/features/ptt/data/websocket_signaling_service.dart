@@ -704,15 +704,25 @@ class WebSocketSignalingService {
         break;
 
       case WSMessageType.floorTaken:
-        final speaker = json['speaker'] as Map<String, dynamic>;
-        final speakerId = speaker['userId'] as String;
+        final speaker = json['speaker'] as Map<String, dynamic>?;
+        if (speaker == null) {
+          debugPrint('WS: floorTaken - missing speaker data');
+          break;
+        }
+        final speakerId = speaker['userId'] as String?;
+        if (speakerId == null || speakerId.isEmpty) {
+          debugPrint('WS: floorTaken - missing speakerId');
+          break;
+        }
         // Handle empty or missing displayName - use a fallback
         String speakerName = speaker['displayName'] as String? ?? '';
         if (speakerName.isEmpty) {
           // Try to get name from other fields or use a generated name
+          // Safe substring - handle IDs shorter than 6 chars
+          final idSuffix = speakerId.length >= 6 ? speakerId.substring(0, 6) : speakerId;
           speakerName = speaker['name'] as String? ??
                         speaker['email']?.toString().split('@').first ??
-                        'User ${speakerId.substring(0, 6)}';
+                        'User $idSuffix';
         }
         debugPrint('WS: floorTaken - speakerId: $speakerId, speakerName: $speakerName');
         _floorStateController.add((

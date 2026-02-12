@@ -66,6 +66,7 @@ class WebRTCService {
   /// Initialize local audio stream (microphone access)
   Future<MediaStream?> initLocalStream() async {
     try {
+      // Try with full audio constraints first
       final constraints = {
         'audio': {
           'echoCancellation': true,
@@ -76,9 +77,21 @@ class WebRTCService {
         'video': false,
       };
 
-      _localStream = await navigator.mediaDevices.getUserMedia(constraints);
-      Logger.d('Local audio stream initialized');
-      return _localStream;
+      try {
+        _localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        Logger.d('Local audio stream initialized with full constraints');
+        return _localStream;
+      } catch (e) {
+        // Fallback to simpler constraints if device doesn't support all options
+        Logger.w('Full audio constraints failed, trying fallback: $e');
+        final fallbackConstraints = {
+          'audio': true,
+          'video': false,
+        };
+        _localStream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+        Logger.d('Local audio stream initialized with fallback constraints');
+        return _localStream;
+      }
     } catch (e) {
       Logger.e('Failed to initialize local stream', error: e);
       return null;
@@ -252,6 +265,20 @@ class WebRTCService {
 
     // Handle ICE candidates
     pc.onIceCandidate = (RTCIceCandidate candidate) {
+      // Validate candidate fields before processing
+      if (candidate.candidate == null || candidate.candidate!.isEmpty) {
+        Logger.d('Skipping ICE candidate with null/empty candidate string');
+        return;
+      }
+      if (candidate.sdpMid == null) {
+        Logger.d('Skipping ICE candidate with null sdpMid');
+        return;
+      }
+      if (candidate.sdpMLineIndex == null || candidate.sdpMLineIndex! < 0) {
+        Logger.d('Skipping ICE candidate with invalid sdpMLineIndex');
+        return;
+      }
+
       if (_isLiveMode) {
         // In live mode, batch ICE candidates and use callback
         _localIceCandidates.add(candidate);
