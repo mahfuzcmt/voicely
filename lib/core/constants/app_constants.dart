@@ -44,7 +44,7 @@ class AppConstants {
       'urls': [
         'turn:103.159.37.167:3478',
         'turn:103.159.37.167:3478?transport=tcp',
-        'turns:103.159.37.167:5349', // TLS variant if configured
+        'turns:voicelyent.xyz:5349', // TLS requires hostname for certificate validation
       ],
       'username': 'voicely',
       'credential': 'VoicelyTurn2024Secure',
