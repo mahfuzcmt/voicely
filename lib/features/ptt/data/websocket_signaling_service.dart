@@ -298,6 +298,11 @@ class WebSocketSignalingService {
   String? get userId => _userId;
   Set<String> get joinedRooms => Set.unmodifiable(_joinedRooms);
 
+  /// Get current members of a room
+  List<WSRoomMember> getRoomMembers(String roomId) {
+    return List.unmodifiable(_roomMembers[roomId] ?? []);
+  }
+
   /// Connection timeout duration
   static const Duration _connectionTimeout = Duration(seconds: 15);
   static const Duration _authTimeout = Duration(seconds: 10);
@@ -406,6 +411,12 @@ class WebSocketSignalingService {
   void joinRoom(String roomId) {
     if (!isConnected) {
       Logger.w('Cannot join room - not connected');
+      return;
+    }
+
+    // Prevent duplicate join requests
+    if (_joinedRooms.contains(roomId)) {
+      debugPrint('WS: Already in room $roomId, skipping join');
       return;
     }
 
