@@ -264,9 +264,14 @@ class WebSocketSignalingService {
   static const int _maxReconnectAttempts = 5;
   static const Duration _heartbeatInterval = Duration(seconds: 15);
   static const Duration _initialReconnectDelay = Duration(seconds: 1);
+  static const int _maxMissedPongs = 3;
 
   // Auth completion tracking
   Completer<bool>? _authCompleter;
+
+  // PONG tracking for dead connection detection
+  int _missedPongs = 0;
+  bool _awaitingPong = false;
 
   // State
   WSConnectionState _connectionState = WSConnectionState.disconnected;
@@ -282,11 +287,13 @@ class WebSocketSignalingService {
   final _webrtcOfferController = StreamController<({String roomId, String fromUserId, String sdp})>.broadcast();
   final _webrtcAnswerController = StreamController<({String roomId, String fromUserId, String sdp})>.broadcast();
   final _webrtcIceController = StreamController<({String roomId, String fromUserId, String candidate, String sdpMid, int sdpMLineIndex})>.broadcast();
+  final _floorDeniedController = StreamController<({String roomId, String? reason})>.broadcast();
 
   // Streams
   Stream<WSConnectionState> get connectionState => _connectionStateController.stream;
   Stream<WSMessage> get messages => _messageController.stream;
   Stream<({String roomId, WSFloorState? state})> get floorState => _floorStateController.stream;
+  Stream<({String roomId, String? reason})> get floorDenied => _floorDeniedController.stream;
   Stream<({String roomId, List<WSRoomMember> members})> get roomMembers => _roomMembersController.stream;
   Stream<({String roomId, String fromUserId, String sdp})> get webrtcOffers => _webrtcOfferController.stream;
   Stream<({String roomId, String fromUserId, String sdp})> get webrtcAnswers => _webrtcAnswerController.stream;
@@ -408,14 +415,14 @@ class WebSocketSignalingService {
   }
 
   /// Join a room/channel
-  void joinRoom(String roomId) {
+  void joinRoom(String roomId, {bool rejoin = false}) {
     if (!isConnected) {
       Logger.w('Cannot join room - not connected');
       return;
     }
 
-    // Prevent duplicate join requests
-    if (_joinedRooms.contains(roomId)) {
+    // Prevent duplicate join requests (but allow rejoin after reconnect)
+    if (_joinedRooms.contains(roomId) && !rejoin) {
       debugPrint('WS: Already in room $roomId, skipping join');
       return;
     }
@@ -551,9 +558,9 @@ class WebSocketSignalingService {
             _authCompleter!.complete(true);
           }
 
-          // Rejoin rooms after reconnect
+          // Rejoin rooms after reconnect (force rejoin since we have a new connection)
           for (final roomId in _joinedRooms.toList()) {
-            joinRoom(roomId);
+            joinRoom(roomId, rejoin: true);
           }
           break;
 
@@ -570,7 +577,9 @@ class WebSocketSignalingService {
           break;
 
         case WSMessageType.pong:
-          // Heartbeat response received
+          // Heartbeat response received - reset missed pong counter
+          _missedPongs = 0;
+          _awaitingPong = false;
           break;
 
         case WSMessageType.roomJoined:
@@ -754,8 +763,11 @@ class WebSocketSignalingService {
         break;
 
       case WSMessageType.floorDenied:
-        // Floor denied, current state unchanged
         Logger.w('Floor denied: ${json['reason']}');
+        _floorDeniedController.add((
+          roomId: roomId,
+          reason: json['reason'] as String?,
+        ));
         break;
 
       default:
@@ -808,8 +820,23 @@ class WebSocketSignalingService {
   /// Start heartbeat timer
   void _startHeartbeat() {
     _stopHeartbeat();
+    _missedPongs = 0;
+    _awaitingPong = false;
     _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
       if (_channel != null && isConnected) {
+        // Check if we missed too many pongs (dead connection)
+        if (_awaitingPong) {
+          _missedPongs++;
+          debugPrint('WS: Missed pong ($_missedPongs/$_maxMissedPongs)');
+          if (_missedPongs >= _maxMissedPongs) {
+            debugPrint('WS: Connection appears dead, forcing reconnect');
+            _missedPongs = 0;
+            _awaitingPong = false;
+            _handleDone();
+            return;
+          }
+        }
+        _awaitingPong = true;
         _send({'type': _messageTypeToString(WSMessageType.ping)});
       }
     });
@@ -826,7 +853,11 @@ class WebSocketSignalingService {
     if (_channel == null) return;
 
     message['timestamp'] = DateTime.now().millisecondsSinceEpoch;
-    _channel!.sink.add(jsonEncode(message));
+    try {
+      _channel!.sink.add(jsonEncode(message));
+    } catch (e) {
+      debugPrint('WS: Failed to send message: $e');
+    }
   }
 
   /// Update connection state
@@ -844,6 +875,7 @@ class WebSocketSignalingService {
     _connectionStateController.close();
     _messageController.close();
     _floorStateController.close();
+    _floorDeniedController.close();
     _roomMembersController.close();
     _webrtcOfferController.close();
     _webrtcAnswerController.close();

@@ -8,6 +8,9 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../../../core/services/background_ptt_service.dart';
 import '../../../../core/services/native_audio_service.dart';
 import '../../../../di/providers.dart';
+import '../../../messaging/data/message_repository.dart';
+import '../../data/audio_recording_service.dart';
+import '../../data/audio_storage_service.dart';
 import '../../data/live_streaming_service.dart';
 import '../../data/websocket_signaling_service.dart';
 import 'audio_providers.dart';
@@ -65,13 +68,16 @@ class LivePttSessionState {
     this.iceState,
   });
 
+  /// Use a sentinel value to distinguish "not provided" from "set to null"
+  static const _sentinel = Object();
+
   LivePttSessionState copyWith({
     LivePttState? state,
-    String? errorMessage,
+    Object? errorMessage = _sentinel,
     DateTime? broadcastStartTime,
-    String? currentSpeakerId,
-    String? currentSpeakerName,
-    DateTime? floorExpiresAt,
+    Object? currentSpeakerId = _sentinel,
+    Object? currentSpeakerName = _sentinel,
+    Object? floorExpiresAt = _sentinel,
     WSConnectionState? connectionState,
     bool? isMuted,
     int? audioTracksReceived,
@@ -80,11 +86,19 @@ class LivePttSessionState {
   }) {
     return LivePttSessionState(
       state: state ?? this.state,
-      errorMessage: errorMessage,
+      errorMessage: identical(errorMessage, _sentinel)
+          ? this.errorMessage
+          : errorMessage as String?,
       broadcastStartTime: broadcastStartTime ?? this.broadcastStartTime,
-      currentSpeakerId: currentSpeakerId,
-      currentSpeakerName: currentSpeakerName,
-      floorExpiresAt: floorExpiresAt,
+      currentSpeakerId: identical(currentSpeakerId, _sentinel)
+          ? this.currentSpeakerId
+          : currentSpeakerId as String?,
+      currentSpeakerName: identical(currentSpeakerName, _sentinel)
+          ? this.currentSpeakerName
+          : currentSpeakerName as String?,
+      floorExpiresAt: identical(floorExpiresAt, _sentinel)
+          ? this.floorExpiresAt
+          : floorExpiresAt as DateTime?,
       connectionState: connectionState ?? this.connectionState,
       isMuted: isMuted ?? this.isMuted,
       audioTracksReceived: audioTracksReceived ?? this.audioTracksReceived,
@@ -150,7 +164,8 @@ final wsConnectionProvider = FutureProvider<bool>((ref) async {
 });
 
 /// Live PTT session provider for each channel
-final livePttSessionProvider = StateNotifierProvider.autoDispose
+/// NOT autoDispose - must survive widget rebuilds and app backgrounding
+final livePttSessionProvider = StateNotifierProvider
     .family<LivePttSessionNotifier, LivePttSessionState, String>((ref, channelId) {
   final wsService = ref.watch(websocketSignalingServiceProvider);
   final streamingService = ref.watch(liveStreamingServiceProvider(channelId));
@@ -182,6 +197,10 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
   Timer? _autoStopTimer;
   bool _wakelockEnabled = false;
   bool _backgroundServiceStarted = false;
+
+  // Audio recording fields for message archiving
+  bool _isRecordingActive = false;
+  DateTime? _recordingStartTime;
 
   /// Auto-stop broadcasting after 60 seconds to prevent accidental long broadcasts
   static const int _maxBroadcastDurationSeconds = 60;
@@ -281,6 +300,13 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     _streamingStateSubscription = _streamingService.stateStream.listen((streamState) {
       final newState = _mapStreamingToPttState(streamState);
       if (newState != state.state) {
+        // If leaving broadcasting state and recording is active, stop + upload
+        if (state.state == LivePttState.broadcasting &&
+            newState != LivePttState.broadcasting &&
+            _isRecordingActive) {
+          _stopRecordingAndUpload();
+        }
+
         state = state.copyWith(state: newState);
 
         if (newState == LivePttState.broadcasting) {
@@ -447,6 +473,9 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       return false;
     }
 
+    // Start local recording for message archiving (non-blocking)
+    _startLocalRecording();
+
     return true;
   }
 
@@ -458,6 +487,9 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
 
     await _streamingService.stopBroadcasting();
     _stopBroadcastTimer();
+
+    // Stop recording and upload (fire-and-forget)
+    _stopRecordingAndUpload();
 
     state = state.copyWith(
       state: LivePttState.idle,
@@ -520,6 +552,106 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     }
   }
 
+  /// Start local recording for message archiving
+  void _startLocalRecording() {
+    try {
+      final audioRecordingService = _ref.read(audioRecordingServiceProvider);
+      audioRecordingService.hasPermission().then((hasPermission) async {
+        if (!hasPermission) {
+          debugPrint('LivePTT Recording: No microphone permission for archiving');
+          return;
+        }
+        final started = await audioRecordingService.startRecording();
+        if (started) {
+          _isRecordingActive = true;
+          _recordingStartTime = DateTime.now();
+          debugPrint('LivePTT Recording: Local recording started for archiving');
+        } else {
+          debugPrint('LivePTT Recording: Failed to start local recording');
+        }
+      });
+    } catch (e) {
+      debugPrint('LivePTT Recording: Error starting local recording: $e');
+    }
+  }
+
+  /// Stop recording and upload to Firebase Storage, then create message
+  void _stopRecordingAndUpload() {
+    if (!_isRecordingActive) return;
+    _isRecordingActive = false;
+
+    final recordingStart = _recordingStartTime;
+    _recordingStartTime = null;
+
+    // Calculate duration
+    int durationSeconds = 0;
+    if (recordingStart != null) {
+      durationSeconds = DateTime.now().difference(recordingStart).inSeconds;
+    }
+
+    // Skip very short recordings (accidental taps)
+    if (durationSeconds < 1) {
+      debugPrint('LivePTT Recording: Skipping short recording (${durationSeconds}s)');
+      try {
+        _ref.read(audioRecordingServiceProvider).cancelRecording();
+      } catch (_) {}
+      return;
+    }
+
+    // Fire-and-forget upload
+    () async {
+      try {
+        final audioRecordingService = _ref.read(audioRecordingServiceProvider);
+        final audioStorageService = _ref.read(audioStorageServiceProvider);
+        final messageRepo = _ref.read(messageRepositoryProvider);
+
+        final audioFilePath = await audioRecordingService.stopRecording();
+        if (audioFilePath == null) {
+          debugPrint('LivePTT Recording: No audio file to upload');
+          return;
+        }
+
+        debugPrint('LivePTT Recording: Uploading audio...');
+        final audioUrl = await audioStorageService.uploadAudio(
+          filePath: audioFilePath,
+          channelId: channelId,
+        );
+
+        // Get current user info
+        final currentUser = _ref.read(authStateProvider).value;
+        if (currentUser == null) {
+          debugPrint('LivePTT Recording: No user, skipping message creation');
+          return;
+        }
+
+        String senderName;
+        String? senderPhotoUrl;
+        try {
+          final userProfile = await _ref.read(currentUserProvider.future);
+          senderName = userProfile?.displayName ??
+              currentUser.displayName ??
+              'User';
+          senderPhotoUrl = userProfile?.photoUrl;
+        } catch (_) {
+          senderName = currentUser.displayName ?? 'User';
+          senderPhotoUrl = null;
+        }
+
+        await messageRepo.sendAudioMessage(
+          channelId: channelId,
+          senderId: currentUser.uid,
+          senderName: senderName,
+          senderPhotoUrl: senderPhotoUrl,
+          audioUrl: audioUrl,
+          durationSeconds: durationSeconds,
+        );
+        debugPrint('LivePTT Recording: Message created successfully');
+      } catch (e) {
+        debugPrint('LivePTT Recording: Error uploading/creating message: $e');
+      }
+    }();
+  }
+
   /// Play remote audio stream
   Future<void> _playRemoteStream(MediaStream stream) async {
     debugPrint('LivePTT: Playing remote stream: ${stream.id}');
@@ -557,23 +689,15 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       debugPrint('LivePTT: Audio track ${track.id} enabled');
     }
 
-    // Enable speakerphone via native Android + flutter_webrtc multiple times
-    // This is needed because Android audio routing can be slow to switch
-    for (int i = 0; i < 3; i++) {
-      try {
-        // Native Android method (most reliable)
-        await NativeAudioService.setSpeakerOn(true);
-        debugPrint('LivePTT: Native speakerphone enabled (attempt ${i + 1})');
-
-        // Also try Flutter helper
-        await Helper.setSpeakerphoneOn(true);
-        debugPrint('LivePTT: Flutter speakerphone enabled (attempt ${i + 1})');
-
-        // Small delay to let the audio routing settle
-        await Future.delayed(const Duration(milliseconds: 200));
-      } catch (e) {
-        debugPrint('LivePTT: Failed to enable speakerphone (attempt ${i + 1}): $e');
-      }
+    // Enable speakerphone via native Android + flutter_webrtc
+    try {
+      await NativeAudioService.setSpeakerOn(true);
+      await Helper.setSpeakerphoneOn(true);
+      debugPrint('LivePTT: Speakerphone enabled');
+      // Single delay to let audio routing settle
+      await Future.delayed(const Duration(milliseconds: 200));
+    } catch (e) {
+      debugPrint('LivePTT: Failed to enable speakerphone: $e');
     }
 
     // Also try to select audio output device explicitly

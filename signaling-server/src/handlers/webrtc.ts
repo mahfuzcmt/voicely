@@ -155,6 +155,10 @@ export function handleWebRTCIceBatch(
   }>,
   targetUserId?: string
 ): void {
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return;
+  }
+
   const userId = ws.userId!;
 
   const batchMessage: WebRTCIceBatchMessage = {

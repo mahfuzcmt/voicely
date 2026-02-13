@@ -19,7 +19,8 @@ enum LiveStreamingState {
 }
 
 /// Provider for live streaming service per channel
-final liveStreamingServiceProvider = Provider.autoDispose.family<LiveStreamingService, String>(
+/// NOT autoDispose - must survive widget rebuilds and app backgrounding
+final liveStreamingServiceProvider = Provider.family<LiveStreamingService, String>(
   (ref, channelId) {
     final wsService = ref.watch(websocketSignalingServiceProvider);
     final service = LiveStreamingService(
@@ -42,14 +43,16 @@ class LiveStreamingService {
   final Map<String, MediaStream> _remoteStreams = {};
   final Map<String, RTCVideoRenderer> _audioRenderers = {};
   final Map<String, List<RTCIceCandidate>> _pendingIceCandidates = {};
-  final List<RTCIceCandidate> _localIceCandidates = [];
-  Timer? _iceBatchTimer;
 
   // Stream subscriptions
   StreamSubscription? _offerSubscription;
   StreamSubscription? _answerSubscription;
   StreamSubscription? _iceSubscription;
   StreamSubscription? _floorSubscription;
+  StreamSubscription? _floorDeniedSubscription;
+  StreamSubscription? _connectionSubscription;
+  StreamSubscription? _memberJoinedSubscription;
+  Timer? _floorRequestTimeout;
 
   // State
   LiveStreamingState _state = LiveStreamingState.idle;
@@ -141,6 +144,46 @@ class LiveStreamingService {
         _handleFloorStateChange(event.state);
       }
     });
+
+    // Listen for floor denied
+    _floorDeniedSubscription = _wsService.floorDenied.listen((event) {
+      if (event.roomId == channelId) {
+        _handleFloorDenied(event.reason);
+      }
+    });
+
+    // Listen for new members joining the room while we're broadcasting
+    _memberJoinedSubscription = _wsService.roomMembers.listen((event) {
+      if (event.roomId == channelId && _isBroadcasting) {
+        // Check if any member doesn't have a peer connection yet (late joiner)
+        final myUserId = _wsService.userId;
+        for (final member in event.members) {
+          if (member.userId != myUserId &&
+              !_peerConnections.containsKey(member.userId) &&
+              !_pendingOffersSent.containsKey(member.userId)) {
+            debugPrint('LiveStream: Late joiner detected: ${member.displayName}, sending offer');
+            _createAndSendOfferToListener(member.userId);
+          }
+        }
+      }
+    });
+
+    // Listen for WebSocket reconnection to recover WebRTC state
+    _connectionSubscription = _wsService.connectionState.listen((connState) {
+      if (connState == WSConnectionState.authenticated) {
+        _handleReconnected();
+      } else if (connState == WSConnectionState.disconnected ||
+          connState == WSConnectionState.error) {
+        // If we were broadcasting or listening, the connections are now stale
+        if (_state == LiveStreamingState.broadcasting ||
+            _state == LiveStreamingState.listening) {
+          debugPrint('LiveStream: WebSocket lost during active session, cleaning up');
+          _isBroadcasting = false;
+          _closeAllPeerConnections();
+          _updateState(LiveStreamingState.idle);
+        }
+      }
+    });
   }
 
   /// Initialize local audio stream
@@ -216,9 +259,22 @@ class LiveStreamingService {
     debugPrint('LiveStream: Requesting floor');
     _wsService.requestFloor(channelId);
 
+    // Start timeout for floor request - if no response in 5 seconds, give up
+    _floorRequestTimeout?.cancel();
+    _floorRequestTimeout = Timer(AppConstants.floorRequestTimeout, () {
+      if (_state == LiveStreamingState.connecting && !_isBroadcasting) {
+        debugPrint('LiveStream: Floor request timed out');
+        _updateState(LiveStreamingState.error);
+        Future.delayed(const Duration(seconds: 2), () {
+          if (_state == LiveStreamingState.error) {
+            _updateState(LiveStreamingState.idle);
+          }
+        });
+      }
+    });
+
     // Wait for floor granted (handled in _handleFloorStateChange)
     // The actual WebRTC setup happens when floor is granted
-
     return true;
   }
 
@@ -287,7 +343,9 @@ class LiveStreamingService {
 
     // Check if we got the floor
     if (floor.speakerId == _wsService.userId) {
-      // We got the floor - start streaming
+      // We got the floor - cancel timeout and start streaming
+      _floorRequestTimeout?.cancel();
+      _floorRequestTimeout = null;
       debugPrint('LiveStream: We got the floor, starting to broadcast');
       _isBroadcasting = true;
       _updateState(LiveStreamingState.broadcasting);
@@ -306,6 +364,31 @@ class LiveStreamingService {
       _isBroadcasting = false;
       _updateState(LiveStreamingState.listening);
     }
+  }
+
+  /// Handle floor request denied
+  void _handleFloorDenied(String? reason) {
+    debugPrint('LiveStream: Floor denied: $reason');
+    _floorRequestTimeout?.cancel();
+    _floorRequestTimeout = null;
+
+    if (_state == LiveStreamingState.connecting) {
+      _updateState(LiveStreamingState.error);
+      // Return to idle after a short delay so UI can show the error
+      Future.delayed(const Duration(seconds: 2), () {
+        if (_state == LiveStreamingState.error) {
+          _updateState(LiveStreamingState.idle);
+        }
+      });
+    }
+  }
+
+  /// Handle WebSocket reconnection - re-negotiate WebRTC if needed
+  void _handleReconnected() {
+    debugPrint('LiveStream: WebSocket reconnected');
+    // If we had stale peer connections, they are already cleaned up
+    // by the disconnection handler above. Nothing more to do -
+    // the user can start a new broadcast or will receive new offers.
   }
 
   /// Store the SDP offer template for creating connections to late joiners
@@ -618,8 +701,9 @@ class LiveStreamingService {
         debugPrint('LiveStream: ICE gathering complete for $peerId');
         return;
       }
-      // Batch ICE candidates for efficiency
-      _localIceCandidates.add(candidate);
+      // Add directly to per-peer queue (avoids shared list race condition)
+      _peerIceCandidates.putIfAbsent(peerId, () => []);
+      _peerIceCandidates[peerId]!.add(candidate);
       _scheduleIceBatch(peerId);
     };
 
@@ -627,10 +711,12 @@ class LiveStreamingService {
     pc.onConnectionState = (RTCPeerConnectionState state) {
       Logger.d('Connection state with $peerId: $state');
 
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-          state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        // Only close on failed - disconnected is temporary and may recover
         _closePeerConnection(peerId);
       }
+      // Note: RTCPeerConnectionStateDisconnected is handled by
+      // onIceConnectionState with a 5-second grace period
     };
 
     // Handle incoming tracks (for listeners)
@@ -694,16 +780,14 @@ class LiveStreamingService {
           _remoteStreamController.add(remoteStream);
           debugPrint('LiveStream: Step 6 - Stream notification sent');
 
-          // Step 7: Final audio routing check
+          // Step 7: Single delayed audio routing confirmation
           debugPrint('LiveStream: Step 7 - Final audio routing verification');
-          for (int i = 0; i < 5; i++) {
-            await Future.delayed(const Duration(milliseconds: 200));
-            try {
-              await NativeAudioService.setSpeakerOn(true);
-              await Helper.setSpeakerphoneOn(true);
-            } catch (e) {
-              // ignore
-            }
+          await Future.delayed(const Duration(milliseconds: 300));
+          try {
+            await NativeAudioService.setSpeakerOn(true);
+            await Helper.setSpeakerphoneOn(true);
+          } catch (e) {
+            // ignore
           }
 
           // Log final state
@@ -802,15 +886,10 @@ class LiveStreamingService {
 
   /// Schedule batched ICE candidate sending for a specific peer
   void _scheduleIceBatch(String peerId) {
-    // Store candidates per peer for targeted sending
-    _peerIceCandidates.putIfAbsent(peerId, () => []);
-    _peerIceCandidates[peerId]!.addAll(_localIceCandidates);
-    _localIceCandidates.clear();
-
     // Cancel existing timer for this peer
     _peerIceBatchTimers[peerId]?.cancel();
 
-    // Schedule batch send for this peer (reduced from 100ms to 50ms for faster ICE)
+    // Schedule batch send for this peer (50ms batching window)
     _peerIceBatchTimers[peerId] = Timer(const Duration(milliseconds: 50), () {
       _sendBatchedIceCandidates(peerId);
     });
@@ -1018,7 +1097,7 @@ class LiveStreamingService {
 
   /// Modify SDP to constrain audio bandwidth for better multi-device performance
   String _constrainAudioBandwidth(String sdp) {
-    // Add bandwidth constraint for audio (b=AS:30 means 30 kbps)
+    // Add bandwidth constraint for audio (b=AS:48 means 48 kbps)
     // This helps with multiple devices by reducing bandwidth per connection
     final lines = sdp.split('\r\n');
     final newLines = <String>[];
@@ -1029,7 +1108,7 @@ class LiveStreamingService {
       if (lines[i].startsWith('m=audio')) {
         // Check if bandwidth line already exists
         if (i + 1 < lines.length && !lines[i + 1].startsWith('b=')) {
-          newLines.add('b=AS:30'); // 30 kbps for audio
+          newLines.add('b=AS:48'); // 48 kbps for audio (covers 24kbps codec + RTP overhead)
         }
       }
     }
@@ -1041,11 +1120,14 @@ class LiveStreamingService {
   Future<void> dispose() async {
     Logger.d('Disposing LiveStreamingService');
 
-    _iceBatchTimer?.cancel();
+    _floorRequestTimeout?.cancel();
     _offerSubscription?.cancel();
     _answerSubscription?.cancel();
     _iceSubscription?.cancel();
     _floorSubscription?.cancel();
+    _floorDeniedSubscription?.cancel();
+    _connectionSubscription?.cancel();
+    _memberJoinedSubscription?.cancel();
 
     // Clean up per-peer ICE timers
     for (final timer in _peerIceBatchTimers.values) {
@@ -1072,6 +1154,11 @@ class LiveStreamingService {
       await _localStream!.dispose();
       _localStream = null;
     }
+
+    // Reset audio mode to normal so it doesn't affect other apps
+    try {
+      await NativeAudioService.resetAudioMode();
+    } catch (_) {}
 
     await _stateController.close();
     await _remoteStreamController.close();

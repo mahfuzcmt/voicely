@@ -114,7 +114,8 @@ export async function verifyToken(token: string): Promise<AuthResult> {
  */
 export async function handleAuth(
   ws: AuthenticatedWebSocket,
-  token: string
+  token: string,
+  clientDisplayName?: string
 ): Promise<boolean> {
   console.log(`Auth attempt - token length: ${token?.length || 0}, isDev: ${isDevelopment}, skipAuth: ${skipAuth}, hasCredentials: ${!!process.env.GOOGLE_APPLICATION_CREDENTIALS}`);
 
@@ -123,8 +124,12 @@ export async function handleAuth(
 
   if (result.success) {
     // Store user info on WebSocket
+    // Use token-verified display name, but fall back to client-supplied name
+    // for cases where the token doesn't contain one (e.g. phone auth)
     ws.userId = result.userId;
-    ws.displayName = result.displayName;
+    ws.displayName = result.displayName && result.displayName !== 'User'
+      ? result.displayName
+      : (clientDisplayName || result.displayName);
     ws.photoUrl = result.photoUrl;
     ws.rooms = new Set();
 

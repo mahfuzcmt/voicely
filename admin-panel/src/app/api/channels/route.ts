@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
+import { db, storage } from '@/lib/firebase';
 import {
   collection,
   getDocs,
@@ -8,6 +8,7 @@ import {
   orderBy,
   query,
 } from 'firebase/firestore';
+import { ref, uploadString } from 'firebase/storage';
 import { getAdminFromToken } from '@/lib/auth';
 
 // GET all channels
@@ -63,11 +64,20 @@ export async function POST(request: NextRequest) {
       description: description?.trim() || null,
       ownerId: admin.adminId,
       isPrivate,
+      audioArchiveEnabled: true,
       memberCount: 0,
       memberIds: [],
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
+
+    // Create audio archive storage directory with a .keep placeholder
+    try {
+      const keepRef = ref(storage, `channels/${docRef.id}/audio/.keep`);
+      await uploadString(keepRef, '');
+    } catch (storageError) {
+      console.warn('Failed to create audio storage directory:', storageError);
+    }
 
     return NextResponse.json({
       success: true,
@@ -76,6 +86,7 @@ export async function POST(request: NextRequest) {
         name: name.trim(),
         description: description?.trim() || null,
         isPrivate,
+        audioArchiveEnabled: true,
         memberCount: 0,
         memberIds: [],
       },

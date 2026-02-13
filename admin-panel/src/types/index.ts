@@ -28,6 +28,7 @@ export interface Channel {
   isPrivate: boolean;
   memberCount: number;
   memberIds: string[];
+  audioArchiveEnabled?: boolean;
   createdAt?: Date;
   updatedAt?: Date;
 }

@@ -21,7 +21,7 @@ const HEARTBEAT_INTERVAL = parseInt(process.env.WS_HEARTBEAT_INTERVAL || '15000'
 const CONNECTION_TIMEOUT = parseInt(process.env.WS_CONNECTION_TIMEOUT || '30000', 10); // Reduced from 60s
 const MAX_CONNECTIONS_PER_ROOM = parseInt(process.env.MAX_CONNECTIONS_PER_ROOM || '50', 10);
 const MAX_TOTAL_CONNECTIONS = parseInt(process.env.MAX_TOTAL_CONNECTIONS || '500', 10);
-const MESSAGE_RATE_LIMIT = parseInt(process.env.MESSAGE_RATE_LIMIT || '100', 10); // messages per second
+const MESSAGE_RATE_LIMIT = parseInt(process.env.MESSAGE_RATE_LIMIT || '200', 10); // messages per second (generous for ICE batches during WebRTC negotiation)
 const MESSAGE_RATE_WINDOW = 1000; // 1 second window
 
 // Services
@@ -57,8 +57,12 @@ app.get('/stats', (_req: Request, res: Response) => {
   });
 });
 
-// Debug endpoint to check auth configuration
+// Debug endpoint to check auth configuration (development only)
 app.get('/debug', (_req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') {
+    res.status(404).json({ error: 'Not found' });
+    return;
+  }
   res.json({
     nodeEnv: process.env.NODE_ENV || 'not set',
     hasFirebaseCredentials: !!process.env.GOOGLE_APPLICATION_CREDENTIALS,
@@ -206,7 +210,12 @@ wss.on('connection', (ws: WebSocket) => {
     }
 
     // Handle ping/pong manually if client sends ping message
+    // IMPORTANT: Also update isAlive so the heartbeat checker doesn't kill this connection.
+    // Mobile clients may not receive native WS pings through proxies/carriers,
+    // so application-level PING is the primary keepalive mechanism.
     if (message.type === MessageType.PING) {
+      heartbeat(authWs);
+      missedHeartbeats.set(ws, 0);
       ws.send(JSON.stringify({ type: MessageType.PONG, timestamp: Date.now() }));
       return;
     }
@@ -289,17 +298,26 @@ wss.on('connection', (ws: WebSocket) => {
     }
   });
 
+  // Guard against double disconnect processing (error + close both fire)
+  let disconnected = false;
+
   // Handle connection close
   ws.on('close', (code, reason) => {
     clearTimeout(authTimeout);
     console.log(`Connection closed: ${authWs.userId} (code: ${code}, reason: ${reason})`);
-    handleDisconnect(roomManager, floorController, authWs);
+    if (!disconnected) {
+      disconnected = true;
+      handleDisconnect(roomManager, floorController, authWs);
+    }
   });
 
   // Handle errors
   ws.on('error', (error) => {
     console.error(`WebSocket error for ${authWs.userId}:`, error);
-    handleDisconnect(roomManager, floorController, authWs);
+    if (!disconnected) {
+      disconnected = true;
+      handleDisconnect(roomManager, floorController, authWs);
+    }
   });
 });
 
