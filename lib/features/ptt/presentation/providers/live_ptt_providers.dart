@@ -13,7 +13,6 @@ import '../../data/audio_recording_service.dart';
 import '../../data/audio_storage_service.dart';
 import '../../data/live_streaming_service.dart';
 import '../../data/websocket_signaling_service.dart';
-import 'audio_providers.dart';
 
 /// Live PTT state
 enum LivePttState {
@@ -53,6 +52,8 @@ class LivePttSessionState {
   final int audioTracksReceived;
   final bool onTrackFired;
   final String? iceState;
+  // Listener count when broadcasting
+  final int listenerCount;
 
   const LivePttSessionState({
     this.state = LivePttState.disconnected,
@@ -66,6 +67,7 @@ class LivePttSessionState {
     this.audioTracksReceived = 0,
     this.onTrackFired = false,
     this.iceState,
+    this.listenerCount = 0,
   });
 
   /// Use a sentinel value to distinguish "not provided" from "set to null"
@@ -83,6 +85,7 @@ class LivePttSessionState {
     int? audioTracksReceived,
     bool? onTrackFired,
     String? iceState,
+    int? listenerCount,
   }) {
     return LivePttSessionState(
       state: state ?? this.state,
@@ -104,6 +107,7 @@ class LivePttSessionState {
       audioTracksReceived: audioTracksReceived ?? this.audioTracksReceived,
       onTrackFired: onTrackFired ?? this.onTrackFired,
       iceState: iceState ?? this.iceState,
+      listenerCount: listenerCount ?? this.listenerCount,
     );
   }
 
@@ -193,6 +197,7 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
   StreamSubscription? _floorSubscription;
   StreamSubscription? _remoteStreamSubscription;
   StreamSubscription? _debugSubscription;
+  StreamSubscription? _listenerCountSubscription;
   Timer? _broadcastTimer;
   Timer? _autoStopTimer;
   bool _wakelockEnabled = false;
@@ -368,6 +373,12 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
         onTrackFired: debug.onTrack,
         iceState: debug.ice,
       );
+    });
+
+    // Listen for listener count updates when broadcasting
+    _listenerCountSubscription = _streamingService.listenerCountStream.listen((count) {
+      debugPrint('LivePTT: Listener count updated: $count');
+      state = state.copyWith(listenerCount: count);
     });
   }
 
@@ -653,8 +664,10 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
   }
 
   /// Play remote audio stream
+  /// Note: Audio is already configured in LiveStreamingService before peer connection
+  /// This method just handles UI-level concerns
   Future<void> _playRemoteStream(MediaStream stream) async {
-    debugPrint('LivePTT: Playing remote stream: ${stream.id}');
+    debugPrint('LivePTT: Remote stream received: ${stream.id}');
 
     // Ensure wakelock is enabled during playback
     await _enableWakelock();
@@ -664,63 +677,17 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       _backgroundService.notifySpeaking(state.currentSpeakerName!, 'Channel');
     }
 
-    // CRITICAL: Use native Android AudioManager for reliable audio routing
-    debugPrint('LivePTT: Configuring native audio for playback...');
-    try {
-      // First, set up Android audio mode for voice communication
-      final modeResult = await NativeAudioService.setAudioModeForVoiceChat();
-      debugPrint('LivePTT: Native audio mode result: $modeResult');
-
-      // Then enable speakerphone via native code
-      final speakerResult = await NativeAudioService.setSpeakerOn(true);
-      debugPrint('LivePTT: Native speakerphone result: $speakerResult');
-    } catch (e) {
-      debugPrint('LivePTT: Native audio setup error: $e');
-    }
-
-    // Configure audio session for receiving (Flutter layer)
-    final audioManager = _ref.read(audioSessionProvider);
-    await audioManager.configureForReceiving();
-    await audioManager.activate();
-
-    // Ensure all audio tracks are enabled FIRST
+    // Audio tracks are already enabled in LiveStreamingService.onTrack
+    // Just log the state for debugging - DO NOT modify track.enabled here
+    // to avoid conflicts with the mute state managed by LiveStreamingService
     for (final track in stream.getAudioTracks()) {
-      track.enabled = true;
-      debugPrint('LivePTT: Audio track ${track.id} enabled');
+      debugPrint('LivePTT: Audio track ${track.id} state: enabled=${track.enabled}');
     }
 
-    // Enable speakerphone via native Android + flutter_webrtc
-    try {
-      await NativeAudioService.setSpeakerOn(true);
-      await Helper.setSpeakerphoneOn(true);
-      debugPrint('LivePTT: Speakerphone enabled');
-      // Single delay to let audio routing settle
-      await Future.delayed(const Duration(milliseconds: 200));
-    } catch (e) {
-      debugPrint('LivePTT: Failed to enable speakerphone: $e');
-    }
-
-    // Also try to select audio output device explicitly
-    try {
-      // Get available audio output devices and select speaker
-      final devices = await Helper.enumerateDevices('audiooutput');
-      debugPrint('LivePTT: Available audio outputs: ${devices.length}');
-      for (final device in devices) {
-        debugPrint('LivePTT: Audio output: ${device.label} (${device.deviceId})');
-        if (device.label.toLowerCase().contains('speaker')) {
-          await Helper.selectAudioOutput(device.deviceId);
-          debugPrint('LivePTT: Selected speaker output');
-          break;
-        }
-      }
-    } catch (e) {
-      debugPrint('LivePTT: Failed to enumerate/select audio output: $e');
-    }
-
-    // Final check: log audio state
+    // Log audio state for debugging
     try {
       final audioState = await NativeAudioService.getAudioState();
-      debugPrint('LivePTT: Final audio state: $audioState');
+      debugPrint('LivePTT: Audio state: $audioState');
     } catch (e) {
       debugPrint('LivePTT: Failed to get audio state: $e');
     }
@@ -837,6 +804,7 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     _floorSubscription?.cancel();
     _remoteStreamSubscription?.cancel();
     _debugSubscription?.cancel();
+    _listenerCountSubscription?.cancel();
     _stopBroadcastTimer();
 
     // Stop background service and disable wakelock

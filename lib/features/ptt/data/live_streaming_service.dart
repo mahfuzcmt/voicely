@@ -9,6 +9,28 @@ import '../../../core/services/native_audio_service.dart';
 import '../../../core/utils/logger.dart';
 import 'websocket_signaling_service.dart';
 
+/// Simple async lock to prevent concurrent operations
+class _AsyncLock {
+  Completer<void>? _completer;
+
+  Future<T> synchronized<T>(Future<T> Function() fn) async {
+    // Wait for any existing operation to complete
+    while (_completer != null) {
+      await _completer!.future;
+    }
+
+    // Start our operation
+    _completer = Completer<void>();
+    try {
+      return await fn();
+    } finally {
+      final c = _completer;
+      _completer = null;
+      c?.complete();
+    }
+  }
+}
+
 /// Live streaming state
 enum LiveStreamingState {
   idle,
@@ -37,6 +59,12 @@ class LiveStreamingService {
   final String channelId;
   final WebSocketSignalingService _wsService;
 
+  // Synchronization lock to prevent race conditions
+  final _AsyncLock _connectionLock = _AsyncLock();
+
+  // Track if audio is already configured to avoid redundant setup
+  bool _audioConfigured = false;
+
   // WebRTC state
   MediaStream? _localStream;
   final Map<String, RTCPeerConnection> _peerConnections = {};
@@ -64,6 +92,12 @@ class LiveStreamingService {
   bool _onTrackFired = false;
   String? _iceState;
 
+  // Track actually connected listeners (ICE connected)
+  final Set<String> _connectedListeners = {};
+
+  // Track pending delayed futures for cancellation
+  final List<Timer> _pendingTimers = [];
+
   // Controllers
   final _stateController = StreamController<LiveStreamingState>.broadcast();
   final _remoteStreamController = StreamController<MediaStream>.broadcast();
@@ -88,6 +122,13 @@ class LiveStreamingService {
   int get audioTracksReceived => _audioTracksReceived;
   bool get onTrackFired => _onTrackFired;
   String? get iceState => _iceState;
+
+  /// Number of active listeners (actually ICE-connected when broadcasting)
+  int get activeListenerCount => _isBroadcasting ? _connectedListeners.length : 0;
+
+  /// Stream of listener count changes
+  final _listenerCountController = StreamController<int>.broadcast();
+  Stream<int> get listenerCountStream => _listenerCountController.stream;
 
   /// Set muted state for incoming audio
   void setMuted(bool muted) {
@@ -153,18 +194,20 @@ class LiveStreamingService {
     });
 
     // Listen for new members joining the room while we're broadcasting
-    _memberJoinedSubscription = _wsService.roomMembers.listen((event) {
+    _memberJoinedSubscription = _wsService.roomMembers.listen((event) async {
       if (event.roomId == channelId && _isBroadcasting) {
-        // Check if any member doesn't have a peer connection yet (late joiner)
-        final myUserId = _wsService.userId;
-        for (final member in event.members) {
-          if (member.userId != myUserId &&
-              !_peerConnections.containsKey(member.userId) &&
-              !_pendingOffersSent.containsKey(member.userId)) {
-            debugPrint('LiveStream: Late joiner detected: ${member.displayName}, sending offer');
-            _createAndSendOfferToListener(member.userId);
+        // Use lock to prevent race conditions with parallel offer creation
+        await _connectionLock.synchronized(() async {
+          final myUserId = _wsService.userId;
+          for (final member in event.members) {
+            if (member.userId != myUserId &&
+                !_peerConnections.containsKey(member.userId) &&
+                !_pendingOffersSent.containsKey(member.userId)) {
+              debugPrint('LiveStream: Late joiner detected: ${member.displayName}, sending offer');
+              await _createAndSendOfferToListener(member.userId);
+            }
           }
-        }
+        });
       }
     });
 
@@ -224,12 +267,23 @@ class LiveStreamingService {
     }
   }
 
+  /// Reset debug state for new session
+  void _resetDebugState() {
+    _audioTracksReceived = 0;
+    _onTrackFired = false;
+    _iceState = null;
+    _debugController.add((tracks: 0, onTrack: false, ice: null));
+  }
+
   /// Start broadcasting (when PTT pressed)
   Future<bool> startBroadcasting() async {
     if (_isBroadcasting) {
       Logger.w('Already broadcasting');
       return false;
     }
+
+    // Reset debug state for new session
+    _resetDebugState();
 
     _updateState(LiveStreamingState.connecting);
 
@@ -293,15 +347,12 @@ class LiveStreamingService {
     // Release floor - this notifies other users
     _wsService.releaseFloor(channelId);
 
-    // IMPORTANT: Don't close peer connections immediately!
-    // Let ICE complete and audio flow for a moment, then clean up.
-    // This allows any in-flight audio to be delivered.
-    Future.delayed(const Duration(seconds: 2), () {
-      // Only close if we're still not broadcasting (user didn't start again)
-      if (!_isBroadcasting) {
-        _closeAllPeerConnections();
-      }
-    });
+    // Close peer connections immediately to avoid stale connections
+    // when another user starts speaking or we start again quickly
+    await _closeAllPeerConnections();
+
+    // Reset audio configured flag so next session sets it up fresh
+    _audioConfigured = false;
   }
 
   /// Handle floor state changes
@@ -320,20 +371,15 @@ class LiveStreamingService {
         _setLocalAudioEnabled(false);
         _isBroadcasting = false;
         _updateState(LiveStreamingState.idle);
-        // Delayed cleanup of peer connections
-        Future.delayed(const Duration(seconds: 2), () {
-          if (!_isBroadcasting) {
-            _closeAllPeerConnections();
-          }
-        });
+        // Close peer connections immediately to avoid stale connections
+        _closeAllPeerConnections();
+        _audioConfigured = false;
       } else {
-        // Someone else stopped speaking
-        // Don't close peer connections immediately - let ICE finish or timeout naturally
-        // The peer connections will be cleaned up when ICE fails or closes
+        // Someone else stopped speaking - close connections immediately
         debugPrint('LiveStream: Floor released by speaker, returning to idle');
-        // Only close if we've fully connected - otherwise let ICE fail naturally
-        _delayedCleanup();
+        _closeAllPeerConnections();
         _updateState(LiveStreamingState.idle);
+        _audioConfigured = false;
       }
       return;
     }
@@ -355,11 +401,15 @@ class LiveStreamingService {
       // Someone else is speaking - prepare to receive
       debugPrint('LiveStream: Someone else is speaking: ${floor.speakerName}');
 
-      // If we were broadcasting, stop and clean up
+      // If we were broadcasting, stop and clean up immediately
       if (_isBroadcasting) {
         debugPrint('LiveStream: We were broadcasting, cleaning up');
         _closeAllPeerConnections();
+        _audioConfigured = false;
       }
+
+      // Reset debug state for new listening session
+      _resetDebugState();
 
       _isBroadcasting = false;
       _updateState(LiveStreamingState.listening);
@@ -390,9 +440,6 @@ class LiveStreamingService {
     // by the disconnection handler above. Nothing more to do -
     // the user can start a new broadcast or will receive new offers.
   }
-
-  /// Store the SDP offer template for creating connections to late joiners
-  String? _broadcastOfferSdp;
 
   /// Track pending offers sent to specific listeners (to handle their answers)
   final Map<String, bool> _pendingOffersSent = {};
@@ -435,13 +482,23 @@ class LiveStreamingService {
 
     debugPrint('LiveStream: Room has ${members.length} members, my ID: $myUserId');
 
-    for (final member in members) {
-      // Skip ourselves
-      if (member.userId == myUserId) continue;
+    // CRITICAL: Send offers to ALL listeners IN PARALLEL for simultaneous delivery
+    // This ensures all listeners receive the broadcast at the same time
+    final listenersToConnect = members
+        .where((member) => member.userId != myUserId)
+        .toList();
 
-      debugPrint('LiveStream: Creating dedicated connection for listener ${member.userId} (${member.displayName})');
-      await _createAndSendOfferToListener(member.userId);
-    }
+    debugPrint('LiveStream: Sending offers to ${listenersToConnect.length} listeners in parallel');
+
+    // Create all peer connections and send offers simultaneously
+    await Future.wait(
+      listenersToConnect.map((member) async {
+        debugPrint('LiveStream: Creating connection for ${member.userId} (${member.displayName})');
+        await _createAndSendOfferToListener(member.userId);
+      }),
+    );
+
+    debugPrint('LiveStream: All offers sent to listeners');
   }
 
   /// Create a dedicated peer connection and send offer to a specific listener
@@ -450,6 +507,8 @@ class LiveStreamingService {
       // Create peer connection for this listener
       final pc = await _createPeerConnection(listenerId);
       _peerConnections[listenerId] = pc;
+
+      // Note: Listener count will be emitted when ICE actually connects (in onIceConnectionState)
 
       // Add local audio tracks
       if (_localStream != null) {
@@ -503,114 +562,126 @@ class LiveStreamingService {
 
     debugPrint('LiveStream: Received offer from $fromUserId, sdp length: ${sdp.length}');
 
-    try {
-      // CRITICAL: Close any existing PC for this user first to avoid ICE conflicts
-      if (_peerConnections.containsKey(fromUserId)) {
-        debugPrint('LiveStream: Closing existing PC for $fromUserId before creating new one');
+    // Use lock to prevent race conditions when processing multiple offers
+    await _connectionLock.synchronized(() async {
+      try {
+        // CRITICAL: Configure audio for playback FIRST, before any WebRTC operations
+        // This ensures audio routing is ready when tracks arrive
+        if (!_audioConfigured) {
+          debugPrint('LiveStream: Pre-configuring audio for receiving');
+          await _configureAudioForReceiving();
+          _audioConfigured = true;
+        }
+
+        // Close any existing PC for this user first to avoid ICE conflicts
+        if (_peerConnections.containsKey(fromUserId)) {
+          debugPrint('LiveStream: Closing existing PC for $fromUserId before creating new one');
+          await _closePeerConnection(fromUserId);
+        }
+
+        // Create peer connection for this speaker
+        debugPrint('LiveStream: Creating peer connection for $fromUserId');
+        final pc = await _createPeerConnection(fromUserId);
+        _peerConnections[fromUserId] = pc;
+
+        // Add transceiver to receive audio (important for mobile!)
+        debugPrint('LiveStream: Adding audio transceiver for receiving');
+        try {
+          await pc.addTransceiver(
+            kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+            init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+          );
+          debugPrint('LiveStream: Audio transceiver added successfully');
+        } catch (e) {
+          debugPrint('LiveStream: Failed to add transceiver (may be ok on some devices): $e');
+          // Continue anyway - some devices handle this automatically
+        }
+
+        // Set remote description
+        debugPrint('LiveStream: Setting remote description');
+        await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+
+        // Apply any pending ICE candidates immediately after remote description is set
+        await _applyPendingIceCandidates(fromUserId);
+
+        // Create answer
+        debugPrint('LiveStream: Creating answer');
+        final answer = await pc.createAnswer({
+          'offerToReceiveAudio': true,
+          'offerToReceiveVideo': false,
+        });
+
+        await pc.setLocalDescription(answer);
+        debugPrint('LiveStream: Answer created, sending back');
+
+        // Send answer back
+        _wsService.sendAnswer(
+          roomId: channelId,
+          targetUserId: fromUserId,
+          sdp: answer.sdp!,
+        );
+
+        Logger.d('Sent answer to $fromUserId');
+      } catch (e) {
+        Logger.e('Failed to handle offer from $fromUserId', error: e);
+        // Clean up on error
         await _closePeerConnection(fromUserId);
       }
-
-      // CRITICAL: Configure audio for playback BEFORE creating peer connection
-      debugPrint('LiveStream: Configuring audio for receiving');
-      await _configureAudioForReceiving();
-
-      // Create peer connection for this speaker
-      debugPrint('LiveStream: Creating peer connection for $fromUserId');
-      final pc = await _createPeerConnection(fromUserId);
-      _peerConnections[fromUserId] = pc;
-
-      // Add transceiver to receive audio (important for mobile!)
-      debugPrint('LiveStream: Adding audio transceiver for receiving');
-      try {
-        await pc.addTransceiver(
-          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-        );
-        debugPrint('LiveStream: Audio transceiver added successfully');
-      } catch (e) {
-        debugPrint('LiveStream: Failed to add transceiver (may be ok on some devices): $e');
-        // Continue anyway - some devices handle this automatically
-      }
-
-      // Set remote description
-      debugPrint('LiveStream: Setting remote description');
-      await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
-
-      // Apply any pending ICE candidates
-      await _applyPendingIceCandidates(fromUserId);
-
-      // Create answer
-      debugPrint('LiveStream: Creating answer');
-      final answer = await pc.createAnswer({
-        'offerToReceiveAudio': true,
-        'offerToReceiveVideo': false,
-      });
-
-      await pc.setLocalDescription(answer);
-      debugPrint('LiveStream: Answer created, sending back');
-
-      // Send answer back
-      _wsService.sendAnswer(
-        roomId: channelId,
-        targetUserId: fromUserId,
-        sdp: answer.sdp!,
-      );
-
-      Logger.d('Sent answer to $fromUserId');
-    } catch (e) {
-      Logger.e('Failed to handle offer from $fromUserId', error: e);
-    }
+    });
   }
 
   /// Handle incoming answer (response to our targeted offer)
   Future<void> _handleIncomingAnswer(String fromUserId, String sdp) async {
     debugPrint('LiveStream: Received answer from $fromUserId, sdp length: ${sdp.length}');
 
-    try {
-      if (!_isBroadcasting) {
-        debugPrint('LiveStream: Not broadcasting, ignoring answer from $fromUserId');
-        return;
+    // Use lock to prevent race conditions
+    await _connectionLock.synchronized(() async {
+      try {
+        if (!_isBroadcasting) {
+          debugPrint('LiveStream: Not broadcasting, ignoring answer from $fromUserId');
+          return;
+        }
+
+        // We should already have a PC for this user (created when we sent the offer)
+        final pc = _peerConnections[fromUserId];
+
+        if (pc == null) {
+          // We don't have a PC for this user - they might be a late joiner
+          // Create a new connection and send them an offer
+          debugPrint('LiveStream: No PC for $fromUserId, creating one now (late joiner?)');
+          await _createAndSendOfferToListener(fromUserId);
+          return;
+        }
+
+        // Check signaling state
+        final signalingState = pc.signalingState;
+        debugPrint('LiveStream: Current signaling state for $fromUserId: $signalingState');
+
+        if (signalingState == RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
+          // Good state - we're expecting an answer
+          await pc.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
+          debugPrint('LiveStream: Answer set successfully for $fromUserId');
+
+          // Clear the pending offer flag
+          _pendingOffersSent.remove(fromUserId);
+
+          // Apply pending ICE candidates immediately
+          await _applyPendingIceCandidates(fromUserId);
+
+          debugPrint('LiveStream: Connection establishing with $fromUserId, ICE should start');
+        } else if (signalingState == RTCSignalingState.RTCSignalingStateStable) {
+          // Already stable - connection established
+          debugPrint('LiveStream: Connection already stable for $fromUserId');
+          return;
+        } else {
+          debugPrint('LiveStream: Unexpected signaling state: $signalingState for $fromUserId');
+          return;
+        }
+      } catch (e) {
+        debugPrint('LiveStream: Failed to handle answer from $fromUserId: $e');
+        Logger.e('Failed to handle answer from $fromUserId', error: e);
       }
-
-      // We should already have a PC for this user (created when we sent the offer)
-      final pc = _peerConnections[fromUserId];
-
-      if (pc == null) {
-        // We don't have a PC for this user - they might be a late joiner
-        // Create a new connection and send them an offer
-        debugPrint('LiveStream: No PC for $fromUserId, creating one now (late joiner?)');
-        await _createAndSendOfferToListener(fromUserId);
-        return;
-      }
-
-      // Check signaling state
-      final signalingState = pc.signalingState;
-      debugPrint('LiveStream: Current signaling state for $fromUserId: $signalingState');
-
-      if (signalingState == RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
-        // Good state - we're expecting an answer
-        await pc.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
-        debugPrint('LiveStream: Answer set successfully for $fromUserId');
-
-        // Clear the pending offer flag
-        _pendingOffersSent.remove(fromUserId);
-
-        // Apply pending ICE candidates
-        await _applyPendingIceCandidates(fromUserId);
-
-        debugPrint('LiveStream: Connection establishing with $fromUserId, ICE should start');
-      } else if (signalingState == RTCSignalingState.RTCSignalingStateStable) {
-        // Already stable - connection established
-        debugPrint('LiveStream: Connection already stable for $fromUserId');
-        return;
-      } else {
-        debugPrint('LiveStream: Unexpected signaling state: $signalingState for $fromUserId');
-        return;
-      }
-    } catch (e) {
-      debugPrint('LiveStream: Failed to handle answer from $fromUserId: $e');
-      Logger.e('Failed to handle answer from $fromUserId', error: e);
-    }
+    });
   }
 
   /// Handle incoming ICE candidate
@@ -624,34 +695,37 @@ class LiveStreamingService {
 
     final iceCandidate = RTCIceCandidate(candidate, sdpMid, sdpMLineIndex);
 
-    // Look up the peer connection for this user
-    RTCPeerConnection? pc = _peerConnections[fromUserId];
+    // Use lock to prevent race conditions with offer/answer handling
+    await _connectionLock.synchronized(() async {
+      // Look up the peer connection for this user
+      RTCPeerConnection? pc = _peerConnections[fromUserId];
 
-    // If no PC yet, queue the candidate - it will be applied when PC is created
-    if (pc == null) {
-      _pendingIceCandidates.putIfAbsent(fromUserId, () => []);
-      _pendingIceCandidates[fromUserId]!.add(iceCandidate);
-      debugPrint('LiveStream: Queued ICE candidate from $fromUserId (no PC yet, queue size: ${_pendingIceCandidates[fromUserId]!.length})');
-      return;
-    }
+      // If no PC yet, queue the candidate - it will be applied when PC is created
+      if (pc == null) {
+        _pendingIceCandidates.putIfAbsent(fromUserId, () => []);
+        _pendingIceCandidates[fromUserId]!.add(iceCandidate);
+        debugPrint('LiveStream: Queued ICE candidate from $fromUserId (no PC yet, queue size: ${_pendingIceCandidates[fromUserId]!.length})');
+        return;
+      }
 
-    // Check if remote description is set
-    final remoteDesc = await pc.getRemoteDescription();
-    if (remoteDesc == null) {
-      // Queue candidate until remote description is set
-      _pendingIceCandidates.putIfAbsent(fromUserId, () => []);
-      _pendingIceCandidates[fromUserId]!.add(iceCandidate);
-      debugPrint('LiveStream: Queued ICE candidate from $fromUserId (no remote desc yet, queue size: ${_pendingIceCandidates[fromUserId]!.length})');
-      return;
-    }
+      // Check if remote description is set
+      final remoteDesc = await pc.getRemoteDescription();
+      if (remoteDesc == null) {
+        // Queue candidate until remote description is set
+        _pendingIceCandidates.putIfAbsent(fromUserId, () => []);
+        _pendingIceCandidates[fromUserId]!.add(iceCandidate);
+        debugPrint('LiveStream: Queued ICE candidate from $fromUserId (no remote desc yet, queue size: ${_pendingIceCandidates[fromUserId]!.length})');
+        return;
+      }
 
-    try {
-      await pc.addCandidate(iceCandidate);
-      debugPrint('LiveStream: Added ICE candidate from $fromUserId successfully');
-    } catch (e) {
-      debugPrint('LiveStream: Failed to add ICE candidate from $fromUserId: $e');
-      Logger.e('Failed to add ICE candidate', error: e);
-    }
+      try {
+        await pc.addCandidate(iceCandidate);
+        debugPrint('LiveStream: Added ICE candidate from $fromUserId successfully');
+      } catch (e) {
+        debugPrint('LiveStream: Failed to add ICE candidate from $fromUserId: $e');
+        // Don't log as error - ICE candidates can fail for valid reasons (e.g., connection closed)
+      }
+    });
   }
 
   /// Apply queued ICE candidates
@@ -720,7 +794,7 @@ class LiveStreamingService {
     };
 
     // Handle incoming tracks (for listeners)
-    pc.onTrack = (RTCTrackEvent event) async {
+    pc.onTrack = (RTCTrackEvent event) {
       debugPrint('LiveStream: *** onTrack fired! ***');
       debugPrint('LiveStream: Track kind: ${event.track.kind}, id: ${event.track.id}');
       debugPrint('LiveStream: Track enabled: ${event.track.enabled}, muted: ${event.track.muted}');
@@ -735,70 +809,29 @@ class LiveStreamingService {
         _audioTracksReceived++;
         _debugController.add((tracks: _audioTracksReceived, onTrack: true, ice: _iceState));
 
-        // CRITICAL: Configure audio BEFORE anything else
         debugPrint('LiveStream: ========== AUDIO TRACK RECEIVED ==========');
 
-        // Step 1: Native Android audio setup
-        try {
-          debugPrint('LiveStream: Step 1 - Native audio mode setup');
-          await NativeAudioService.setAudioModeForVoiceChat();
-          await NativeAudioService.setSpeakerOn(true);
-          debugPrint('LiveStream: Native audio configured');
-        } catch (e) {
-          debugPrint('LiveStream: Native audio error: $e');
-        }
+        // Audio is already configured in _handleIncomingOffer BEFORE peer connection
+        // Just enable the track and set up the renderer - NO async audio config here
+        // to avoid race conditions
 
-        // Step 2: Flutter WebRTC speaker setup
-        try {
-          debugPrint('LiveStream: Step 2 - Flutter speakerphone');
-          await Helper.setSpeakerphoneOn(true);
-          debugPrint('LiveStream: Flutter speakerphone enabled');
-        } catch (e) {
-          debugPrint('LiveStream: Flutter speaker error: $e');
-        }
-
-        // Step 3: Enable the track
-        event.track.enabled = true;
-        debugPrint('LiveStream: Step 3 - Track enabled: ${event.track.enabled}');
+        // Enable the track immediately (synchronous)
+        event.track.enabled = !_isMuted;
+        debugPrint('LiveStream: Track enabled: ${event.track.enabled}');
 
         if (event.streams.isNotEmpty) {
           final remoteStream = event.streams.first;
           _remoteStreams[peerId] = remoteStream;
 
-          // Step 4: Enable all audio tracks in the stream (respects device volume)
-          debugPrint('LiveStream: Step 4 - Enabling all audio tracks');
+          // Enable all audio tracks in the stream (synchronous, respects mute state)
           for (final track in remoteStream.getAudioTracks()) {
-            track.enabled = true;
-            debugPrint('LiveStream: Track ${track.id} enabled');
+            track.enabled = !_isMuted;
+            debugPrint('LiveStream: Stream track ${track.id} enabled: ${track.enabled}');
           }
 
-          // Step 5: Create renderer to consume the stream
-          debugPrint('LiveStream: Step 5 - Creating audio renderer');
-          await _createAudioRenderer(peerId, remoteStream);
-
-          // Step 6: Notify listeners
-          _remoteStreamController.add(remoteStream);
-          debugPrint('LiveStream: Step 6 - Stream notification sent');
-
-          // Step 7: Single delayed audio routing confirmation
-          debugPrint('LiveStream: Step 7 - Final audio routing verification');
-          await Future.delayed(const Duration(milliseconds: 300));
-          try {
-            await NativeAudioService.setSpeakerOn(true);
-            await Helper.setSpeakerphoneOn(true);
-          } catch (e) {
-            // ignore
-          }
-
-          // Log final state
-          final audioState = await NativeAudioService.getAudioState();
-          debugPrint('LiveStream: ========== FINAL STATE ==========');
-          debugPrint('LiveStream: Audio state: $audioState');
-          debugPrint('LiveStream: Audio tracks: ${remoteStream.getAudioTracks().length}');
-          for (final track in remoteStream.getAudioTracks()) {
-            debugPrint('LiveStream: Track ${track.id}: enabled=${track.enabled}, muted=${track.muted}');
-          }
-          debugPrint('LiveStream: ================================');
+          // Create renderer and notify in a non-blocking way
+          // Use unawaited future to avoid blocking onTrack callback
+          _setupAudioRendererAsync(peerId, remoteStream);
         } else {
           debugPrint('LiveStream: WARNING - No stream in event, only track');
         }
@@ -806,54 +839,76 @@ class LiveStreamingService {
     };
 
     pc.onIceConnectionState = (RTCIceConnectionState state) async {
-      debugPrint('LiveStream: *** ICE Connection State: $state ***');
+      debugPrint('LiveStream: *** ICE Connection State for $peerId: $state ***');
 
       // Update debug state
       _iceState = state.toString().split('.').last;
       _debugController.add((tracks: _audioTracksReceived, onTrack: _onTrackFired, ice: _iceState));
 
-      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
-        debugPrint('LiveStream: ICE CONNECTED! Audio should flow now.');
+      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        debugPrint('LiveStream: ICE CONNECTED with $peerId! Audio should flow now.');
         // Reset restart counter on successful connection
         _iceRestartAttempts[peerId] = 0;
+
+        // Track this peer as connected and emit updated count
+        if (_isBroadcasting && !_connectedListeners.contains(peerId)) {
+          _connectedListeners.add(peerId);
+          _emitListenerCount();
+        }
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-        debugPrint('LiveStream: ICE FAILED! Attempting restart...');
+        debugPrint('LiveStream: ICE FAILED with $peerId! Attempting restart...');
+
+        // Remove from connected listeners
+        _connectedListeners.remove(peerId);
+        _emitListenerCount();
 
         // Try ICE restart before giving up
         final attempts = _iceRestartAttempts[peerId] ?? 0;
-        if (attempts < _maxIceRestartAttempts) {
+        if (attempts < _maxIceRestartAttempts && _isBroadcasting) {
           _iceRestartAttempts[peerId] = attempts + 1;
           debugPrint('LiveStream: ICE restart attempt ${attempts + 1}/$_maxIceRestartAttempts');
 
           try {
-            // ICE restart by creating a new offer with iceRestart option
+            // Trigger ICE restart - this will generate new ICE candidates
             await pc.restartIce();
-            debugPrint('LiveStream: ICE restart triggered');
+            debugPrint('LiveStream: ICE restart triggered for $peerId');
           } catch (e) {
-            debugPrint('LiveStream: ICE restart failed: $e');
+            debugPrint('LiveStream: ICE restart failed for $peerId: $e');
             _closePeerConnection(peerId);
           }
         } else {
-          debugPrint('LiveStream: Max ICE restart attempts reached, closing connection');
+          debugPrint('LiveStream: Max ICE restart attempts reached for $peerId, closing connection');
           _closePeerConnection(peerId);
         }
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-        debugPrint('LiveStream: ICE DISCONNECTED - waiting for reconnection...');
+        debugPrint('LiveStream: ICE DISCONNECTED with $peerId - waiting for reconnection...');
+
+        // Temporarily remove from connected (will re-add if reconnects)
+        _connectedListeners.remove(peerId);
+        _emitListenerCount();
+
         // Don't close immediately - ICE may recover
-        // Set a timeout to close if it doesn't recover
-        Future.delayed(const Duration(seconds: 5), () async {
+        // Use a tracked timer so we can cancel on dispose
+        final timer = Timer(const Duration(seconds: 5), () {
           final currentPc = _peerConnections[peerId];
           if (currentPc != null) {
             final currentState = currentPc.iceConnectionState;
             if (currentState == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
                 currentState == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-              debugPrint('LiveStream: ICE did not recover, closing connection');
+              debugPrint('LiveStream: ICE did not recover for $peerId, closing connection');
               _closePeerConnection(peerId);
             }
           }
         });
+        _pendingTimers.add(timer);
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateClosed) {
-        debugPrint('LiveStream: ICE CLOSED - connection ended normally');
+        debugPrint('LiveStream: ICE CLOSED with $peerId - connection ended normally');
+
+        // Remove from connected listeners
+        _connectedListeners.remove(peerId);
+        _emitListenerCount();
+
         // Only clean up if we haven't already
         if (_peerConnections.containsKey(peerId)) {
           _closePeerConnection(peerId);
@@ -972,6 +1027,42 @@ class LiveStreamingService {
     }
   }
 
+  /// Async setup for audio renderer - called from onTrack without blocking
+  Future<void> _setupAudioRendererAsync(String peerId, MediaStream stream) async {
+    try {
+      // Create renderer
+      await _createAudioRenderer(peerId, stream);
+
+      // Notify listeners that stream is ready
+      _remoteStreamController.add(stream);
+      debugPrint('LiveStream: Stream notification sent');
+
+      // Final audio routing confirmation (only if not already configured)
+      // Use a short delay to let Android audio system settle
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      // Re-confirm speaker is on (belt and suspenders approach)
+      try {
+        await NativeAudioService.setSpeakerOn(true);
+        await Helper.setSpeakerphoneOn(true);
+      } catch (e) {
+        // Ignore - audio should already be configured
+      }
+
+      // Log final state for debugging
+      final audioState = await NativeAudioService.getAudioState();
+      debugPrint('LiveStream: ========== FINAL STATE ==========');
+      debugPrint('LiveStream: Audio state: $audioState');
+      debugPrint('LiveStream: Audio tracks: ${stream.getAudioTracks().length}');
+      for (final track in stream.getAudioTracks()) {
+        debugPrint('LiveStream: Track ${track.id}: enabled=${track.enabled}, muted=${track.muted}');
+      }
+      debugPrint('LiveStream: ================================');
+    } catch (e) {
+      debugPrint('LiveStream: Error in async audio setup: $e');
+    }
+  }
+
   /// Create an audio renderer to play the remote stream
   /// In Flutter WebRTC, even audio-only streams need a renderer to be consumed
   Future<void> _createAudioRenderer(String peerId, MediaStream stream) async {
@@ -990,29 +1081,16 @@ class LiveStreamingService {
 
       _audioRenderers[peerId] = renderer;
       debugPrint('LiveStream: Audio renderer created and stream attached for $peerId');
-
-      // CRITICAL: Use native Android audio to ensure speakerphone is on after renderer setup
-      // This is the most reliable way to route audio to the speaker
-      try {
-        // Short delay to let Android audio routing settle
-        await Future.delayed(const Duration(milliseconds: 50));
-
-        // Native Android AudioManager (most reliable)
-        final nativeResult = await NativeAudioService.setSpeakerOn(true);
-        debugPrint('LiveStream: Native speakerphone after renderer: $nativeResult');
-
-        // Also try Flutter helper
-        await Helper.setSpeakerphoneOn(true);
-        debugPrint('LiveStream: Flutter speakerphone re-confirmed enabled');
-
-        // Log audio state
-        final audioState = await NativeAudioService.getAudioState();
-        debugPrint('LiveStream: Audio state after renderer: $audioState');
-      } catch (e) {
-        debugPrint('LiveStream: Failed to set speakerphone after renderer: $e');
-      }
     } catch (e) {
       debugPrint('LiveStream: Failed to create audio renderer: $e');
+    }
+  }
+
+  /// Emit the current listener count to the stream
+  void _emitListenerCount() {
+    if (_isBroadcasting) {
+      _listenerCountController.add(_connectedListeners.length);
+      debugPrint('LiveStream: Connected listener count: ${_connectedListeners.length}');
     }
   }
 
@@ -1027,6 +1105,10 @@ class LiveStreamingService {
     if (pc != null) {
       await pc.close();
     }
+
+    // Remove from connected listeners and emit updated count
+    _connectedListeners.remove(peerId);
+    _emitListenerCount();
 
     final stream = _remoteStreams.remove(peerId);
     if (stream != null) {
@@ -1064,17 +1146,10 @@ class LiveStreamingService {
     _peerIceCandidates.clear();
     _pendingOffersSent.clear();
     _iceRestartAttempts.clear();
-  }
+    _connectedListeners.clear();
 
-  /// Delayed cleanup - allows ICE to complete before closing
-  void _delayedCleanup() {
-    // Give ICE some time to complete or fail naturally
-    Future.delayed(const Duration(seconds: 3), () {
-      if (_state == LiveStreamingState.idle && !_isBroadcasting) {
-        debugPrint('LiveStream: Delayed cleanup - closing peer connections');
-        _closeAllPeerConnections();
-      }
-    });
+    // Emit zero listeners
+    _listenerCountController.add(0);
   }
 
   /// Enable/disable local audio
@@ -1129,6 +1204,12 @@ class LiveStreamingService {
     _connectionSubscription?.cancel();
     _memberJoinedSubscription?.cancel();
 
+    // Cancel all pending delayed timers (ICE disconnection checks, etc.)
+    for (final timer in _pendingTimers) {
+      timer.cancel();
+    }
+    _pendingTimers.clear();
+
     // Clean up per-peer ICE timers
     for (final timer in _peerIceBatchTimers.values) {
       timer?.cancel();
@@ -1137,6 +1218,7 @@ class LiveStreamingService {
     _peerIceCandidates.clear();
     _pendingOffersSent.clear();
     _iceRestartAttempts.clear();
+    _connectedListeners.clear();
 
     await _closeAllPeerConnections();
 
@@ -1164,5 +1246,6 @@ class LiveStreamingService {
     await _remoteStreamController.close();
     await _speakerController.close();
     await _debugController.close();
+    await _listenerCountController.close();
   }
 }

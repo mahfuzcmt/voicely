@@ -201,6 +201,29 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
                 if (session.isBroadcasting) ...[
                   _buildRecordingIndicator(session.isBroadcastTimeWarning ? Colors.red : iconColor),
                   SizedBox(height: widget.size * 0.02),
+                  // Show listener count when broadcasting
+                  if (session.listenerCount > 0) ...[
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.headphones,
+                          size: widget.size * 0.045,
+                          color: Colors.green,
+                        ),
+                        SizedBox(width: widget.size * 0.01),
+                        Text(
+                          '${session.listenerCount}',
+                          style: TextStyle(
+                            fontSize: widget.size * 0.05,
+                            color: Colors.green,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: widget.size * 0.01),
+                  ],
                   Text(
                     session.isBroadcastTimeWarning
                         ? '${session.remainingBroadcastSeconds}s'
