@@ -108,7 +108,9 @@ export class RoomManager {
     if (!room) return [];
 
     const members: RoomMember[] = [];
+    console.log(`RoomManager: Getting members for room ${roomId}:`);
     for (const [userId, ws] of room.members) {
+      console.log(`  - Member: userId=${userId}, ws.displayName="${ws.displayName}"`);
       members.push({
         userId,
         displayName: ws.displayName || 'Unknown',

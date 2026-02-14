@@ -120,7 +120,8 @@ export async function handleAuth(
   console.log(`Auth attempt - token length: ${token?.length || 0}, isDev: ${isDevelopment}, skipAuth: ${skipAuth}, hasCredentials: ${!!process.env.GOOGLE_APPLICATION_CREDENTIALS}`);
 
   const result = await verifyToken(token);
-  console.log(`Auth result: success=${result.success}, userId=${result.userId}, error=${result.error}`);
+  console.log(`Auth result: success=${result.success}, userId=${result.userId}, tokenDisplayName="${result.displayName}", error=${result.error}`);
+  console.log(`Auth: clientDisplayName received: "${clientDisplayName}"`);
 
   if (result.success) {
     // Store user info on WebSocket
@@ -141,7 +142,7 @@ export async function handleAuth(
     };
 
     ws.send(JSON.stringify(successMessage));
-    console.log(`User authenticated: ${result.userId} (${result.displayName})`);
+    console.log(`User authenticated: ${result.userId}, STORED displayName="${ws.displayName}" (token had: "${result.displayName}", client sent: "${clientDisplayName}")`);
     return true;
   } else {
     const failedMessage: AuthFailedMessage = {

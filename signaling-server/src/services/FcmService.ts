@@ -170,11 +170,17 @@ export class FcmService {
     // Get channel name for the notification
     const channelName = await this.getChannelName(channelId);
 
-    // Build the high-priority data message
-    // IMPORTANT: This is a DATA-ONLY message (no 'notification' field)
-    // Data messages are handled by the app, not the system
+    // Build the high-priority message with BOTH notification and data
+    // NOTIFICATION payload ensures the message is delivered when app is killed
+    // DATA payload allows the app to handle it when in foreground/background
     const message: admin.messaging.MulticastMessage = {
       tokens,
+      // NOTIFICATION payload - shown by system when app is killed
+      notification: {
+        title: `${speakerName} is speaking`,
+        body: `Tap to listen in ${channelName}`,
+      },
+      // DATA payload - for app to handle
       data: {
         type: FcmMessageType.LIVE_BROADCAST_STARTED,
         channelId,
@@ -182,21 +188,36 @@ export class FcmService {
         speakerId,
         speakerName,
         timestamp: Date.now().toString(),
+        // Click action to open the app
+        click_action: 'FLUTTER_NOTIFICATION_CLICK',
       },
       android: {
         // HIGH PRIORITY: Wakes up device from Doze mode
         priority: 'high',
         // Short TTL: If not delivered in 30 seconds, it's stale
         ttl: 30 * 1000,
+        notification: {
+          channelId: 'voicely_live_channel', // Must match Android app's channel
+          priority: 'max',
+          defaultSound: true,
+          defaultVibrateTimings: true,
+          visibility: 'public',
+          icon: 'ic_notification', // Your notification icon
+          color: '#FF9800', // Orange
+          tag: `live_${channelId}`, // Replaces previous notification for same channel
+        },
       },
       apns: {
         headers: {
           'apns-priority': '10', // High priority for iOS
-          'apns-push-type': 'background',
+          'apns-push-type': 'alert', // Changed from 'background' to 'alert'
         },
         payload: {
           aps: {
-            'content-available': 1, // Silent push for iOS background wake
+            'content-available': 1,
+            sound: 'default',
+            badge: 1,
+            'interruption-level': 'time-sensitive', // iOS 15+ time-sensitive
           },
         },
       },
