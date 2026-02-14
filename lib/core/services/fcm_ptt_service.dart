@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
+import 'dart:ui';
 
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// FCM message types for PTT
@@ -217,7 +220,105 @@ Future<void> handleFcmPttBackgroundMessage(RemoteMessage message) async {
   debugPrint('FCM Background: Received message');
   debugPrint('FCM Background: Data: ${message.data}');
 
+  final data = message.data;
+  final type = data['type'] as String? ?? '';
+
+  // Show notification for live broadcast when app is in background/killed
+  if (type == 'live_broadcast_started') {
+    final speakerName = data['speakerName'] as String? ?? 'Someone';
+    final channelName = data['channelName'] as String? ?? 'a channel';
+    final channelId = data['channelId'] as String? ?? '';
+
+    await _showLiveBroadcastNotification(
+      speakerName: speakerName,
+      channelName: channelName,
+      channelId: channelId,
+    );
+  }
+
   // Handle the PTT message
   final fcmService = FcmPttService();
   await fcmService.handleMessage(message);
+}
+
+/// Show a notification when someone starts speaking (app in background/killed)
+Future<void> _showLiveBroadcastNotification({
+  required String speakerName,
+  required String channelName,
+  required String channelId,
+}) async {
+  debugPrint('FCM Background: Showing notification for $speakerName in $channelName');
+
+  final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+
+  // Initialize notifications
+  const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const iosSettings = DarwinInitializationSettings(
+    requestSoundPermission: true,
+    requestBadgePermission: true,
+    requestAlertPermission: true,
+  );
+  const initSettings = InitializationSettings(
+    android: androidSettings,
+    iOS: iosSettings,
+  );
+
+  await flutterLocalNotificationsPlugin.initialize(initSettings);
+
+  // Create notification channel for Android
+  const androidChannel = AndroidNotificationChannel(
+    'voicely_live_channel',
+    'Live Broadcasts',
+    description: 'Notifications when someone is speaking',
+    importance: Importance.high,
+    playSound: true,
+    enableVibration: true,
+  );
+
+  await flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(androidChannel);
+
+  // Show the notification with attention-grabbing sound
+  final androidDetails = AndroidNotificationDetails(
+    'voicely_live_channel',
+    'Live Broadcasts',
+    channelDescription: 'Notifications when someone is speaking',
+    importance: Importance.max,
+    priority: Priority.max,
+    showWhen: true,
+    autoCancel: true,
+    category: AndroidNotificationCategory.call, // Treated like a call
+    visibility: NotificationVisibility.public,
+    fullScreenIntent: true, // Shows on lock screen
+    playSound: true,
+    sound: const RawResourceAndroidNotificationSound('notification_sound'), // Custom sound or use default
+    enableVibration: true,
+    vibrationPattern: Int64List.fromList([0, 500, 200, 500, 200, 500]), // Attention pattern
+    ongoing: false,
+    colorized: true,
+    color: const Color(0xFFFF9800), // Orange color
+  );
+
+  const iosDetails = DarwinNotificationDetails(
+    presentAlert: true,
+    presentBadge: true,
+    presentSound: true,
+    interruptionLevel: InterruptionLevel.timeSensitive,
+  );
+
+  final notificationDetails = NotificationDetails(
+    android: androidDetails,
+    iOS: iosDetails,
+  );
+
+  await flutterLocalNotificationsPlugin.show(
+    channelId.hashCode, // Unique ID per channel
+    '$speakerName is speaking',
+    'Tap to listen in $channelName',
+    notificationDetails,
+    payload: channelId, // Pass channelId to open correct channel when tapped
+  );
+
+  debugPrint('FCM Background: Notification shown');
 }

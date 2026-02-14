@@ -6,8 +6,8 @@ import '../../../../core/theme/app_colors.dart';
 import '../../../../di/providers.dart';
 import '../../domain/models/user_model.dart';
 
-// Global auto-play setting provider
-final autoPlayEnabledProvider = StateProvider<bool>((ref) => false);
+// Global auto-play setting provider (enabled by default)
+final autoPlayEnabledProvider = StateProvider<bool>((ref) => true);
 
 class ProfileScreen extends ConsumerWidget {
   const ProfileScreen({super.key});

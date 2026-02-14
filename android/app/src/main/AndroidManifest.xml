@@ -64,10 +64,10 @@
             </intent-filter>
         </activity>
 
-        <!-- FCM default channel -->
+        <!-- FCM default channel for live broadcasts -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
-            android:value="voicely_channel" />
+            android:value="voicely_live_channel" />
 
         <!-- High priority for FCM -->
         <meta-data

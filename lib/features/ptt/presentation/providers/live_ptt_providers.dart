@@ -162,8 +162,8 @@ final wsConnectionProvider = FutureProvider<bool>((ref) async {
     return false;
   }
 
-  // Get Firebase ID token for authentication
-  final token = await user.getIdToken();
+  // Get FRESH Firebase ID token for authentication
+  final token = await user.getIdToken(true);
   if (token == null) {
     return false;
   }
@@ -593,29 +593,36 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     state = state.copyWith(state: LivePttState.connecting);
 
     try {
-      // Get token with timeout
-      final token = await user.getIdToken().timeout(
+      // Get FRESH token (force refresh to avoid expired token issues)
+      final token = await user.getIdToken(true).timeout(
         _initTimeout,
         onTimeout: () => throw TimeoutException('Token fetch timed out'),
       );
-      debugPrint('LivePTT: Got token, length: ${token?.length ?? 0}');
+      debugPrint('LivePTT: Got fresh token, length: ${token?.length ?? 0}');
 
       if (token != null) {
         // Get display name with timeout
-        String? displayName = user.displayName;
+        // DEBUG: Track all sources of displayName
+        final firebaseDisplayName = user.displayName;
+        debugPrint('LivePTT: Firebase Auth displayName="${firebaseDisplayName}" (length=${firebaseDisplayName?.length ?? 0})');
+
+        String? displayName = firebaseDisplayName;
         if (displayName == null || displayName.isEmpty) {
+          debugPrint('LivePTT: Firebase displayName empty, fetching from Firestore...');
           try {
             final userModel = await _ref.read(currentUserProvider.future).timeout(
               _initTimeout,
               onTimeout: () => null,
             );
+            debugPrint('LivePTT: Firestore userModel.displayName="${userModel?.displayName}" (length=${userModel?.displayName?.length ?? 0})');
+            debugPrint('LivePTT: Firestore userModel.phoneNumber="${userModel?.phoneNumber}"');
             displayName = userModel?.displayName ?? userModel?.phoneNumber;
           } catch (e) {
-            debugPrint('LivePTT: Failed to get display name: $e');
+            debugPrint('LivePTT: Failed to get display name from Firestore: $e');
           }
         }
 
-        debugPrint('LivePTT: Connecting to WebSocket with displayName: $displayName');
+        debugPrint('LivePTT: FINAL displayName to send="${displayName}" (length=${displayName?.length ?? 0})');
         await _wsService.connect(token, displayName: displayName).timeout(
           _connectionTimeout,
           onTimeout: () {
@@ -1101,11 +1108,32 @@ final isCurrentUserSpeakingLiveProvider =
   return session.currentSpeakerId == wsService.userId && session.isBroadcasting;
 });
 
-/// Provider for room members
+/// Provider for room members - combines initial cached value with stream updates
 final liveRoomMembersProvider =
     StreamProvider.family<List<WSRoomMember>, String>((ref, channelId) {
   final wsService = ref.watch(websocketSignalingServiceProvider);
-  return wsService.roomMembers
-      .where((event) => event.roomId == channelId)
-      .map((event) => event.members);
+
+  // Create a stream that starts with the current cached members
+  // then updates whenever the stream emits new values for this room
+  return Stream.multi((controller) {
+    // First, emit the current cached members immediately
+    final initialMembers = wsService.getRoomMembers(channelId);
+    if (initialMembers.isNotEmpty) {
+      controller.add(initialMembers);
+    }
+
+    // Then listen to stream updates
+    final subscription = wsService.roomMembers
+        .where((event) => event.roomId == channelId)
+        .map((event) => event.members)
+        .listen(
+          controller.add,
+          onError: controller.addError,
+          onDone: controller.close,
+        );
+
+    controller.onCancel = () {
+      subscription.cancel();
+    };
+  });
 });

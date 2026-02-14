@@ -187,9 +187,15 @@ class WSRoomMember {
   });
 
   factory WSRoomMember.fromJson(Map<String, dynamic> json) {
+    // Extensive debug logging for displayName issue
+    debugPrint('WSRoomMember.fromJson: RAW JSON = $json');
+    final rawDisplayName = json['displayName'];
+    debugPrint('WSRoomMember.fromJson: rawDisplayName type=${rawDisplayName.runtimeType}, value="$rawDisplayName"');
+    final name = rawDisplayName as String? ?? 'Unknown';
+    debugPrint('WSRoomMember.fromJson: FINAL displayName="$name" (length=${name.length})');
     return WSRoomMember(
       userId: json['userId'] as String,
-      displayName: json['displayName'] as String,
+      displayName: name,
       photoUrl: json['photoUrl'] as String?,
       joinedAt: DateTime.fromMillisecondsSinceEpoch(json['joinedAt'] as int),
     );
@@ -378,11 +384,14 @@ class WebSocketSignalingService {
       // Create completer for auth result
       _authCompleter = Completer<bool>();
 
-      _send({
+      // DEBUG: Log exactly what we're sending
+      final Map<String, dynamic> authPayload = {
         'type': _messageTypeToString(WSMessageType.auth),
         'token': authToken,
         if (displayName != null && displayName.isNotEmpty) 'displayName': displayName,
-      });
+      };
+      debugPrint('WS AUTH: Sending auth with displayName="${authPayload['displayName']}"');
+      _send(authPayload);
 
       // Wait for auth result with timeout
       debugPrint('WS: Waiting for auth (timeout: ${_authTimeout.inSeconds}s)...');
@@ -604,6 +613,9 @@ class WebSocketSignalingService {
           _displayName = json['displayName'] as String?;
           _reconnectAttempts = 0;
           _updateState(WSConnectionState.authenticated);
+          // DEBUG: Log auth success details
+          debugPrint('WS AUTH_SUCCESS: userId=$_userId, displayName="$_displayName" (length=${_displayName?.length ?? 0})');
+          debugPrint('WS AUTH_SUCCESS: RAW JSON = $json');
           Logger.d('WebSocket authenticated as $_userId');
 
           // Complete auth completer if waiting
@@ -639,9 +651,22 @@ class WebSocketSignalingService {
           final roomId = json['roomId'] as String;
           _joinedRooms.add(roomId);
 
-          final members = (json['members'] as List?)
+          // Debug: Log raw members data
+          final rawMembers = json['members'] as List?;
+          debugPrint('WS: room_joined - raw members count: ${rawMembers?.length ?? 0}');
+          if (rawMembers != null) {
+            for (int i = 0; i < rawMembers.length; i++) {
+              debugPrint('WS: room_joined - member[$i]: ${rawMembers[i]}');
+            }
+          }
+
+          final members = rawMembers
               ?.map((m) => WSRoomMember.fromJson(m as Map<String, dynamic>))
               .toList() ?? [];
+          debugPrint('WS: room_joined - parsed ${members.length} members:');
+          for (final m in members) {
+            debugPrint('WS:   - ${m.userId}: "${m.displayName}"');
+          }
           _roomMembers[roomId] = members;
           _roomMembersController.add((roomId: roomId, members: members));
 
@@ -679,12 +704,12 @@ class WebSocketSignalingService {
 
         case WSMessageType.roomMembers:
           final roomId = json['roomId'] as String;
-          final members = (json['members'] as List?)
+          final rawMembers = json['members'] as List?;
+          final members = rawMembers
               ?.map((m) => WSRoomMember.fromJson(m as Map<String, dynamic>))
               .toList() ?? [];
           _roomMembers[roomId] = members;
           _roomMembersController.add((roomId: roomId, members: members));
-          debugPrint('WS: Room members updated $roomId: ${members.length}');
           break;
 
         case WSMessageType.floorGranted:
@@ -996,7 +1021,10 @@ class WebSocketSignalingService {
 
   /// Send a message
   void _send(Map<String, dynamic> message) {
-    if (_channel == null) return;
+    if (_channel == null) {
+      debugPrint('WS: Cannot send - channel is null');
+      return;
+    }
 
     message['timestamp'] = DateTime.now().millisecondsSinceEpoch;
     try {

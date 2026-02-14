@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:just_audio/just_audio.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/background_audio_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
 import '../../../../di/providers.dart';
+import '../../../../main.dart' show notificationTapStream;
 import '../../../auth/presentation/screens/profile_screen.dart';
 import '../../../messaging/data/message_repository.dart';
 import '../../../messaging/domain/models/message_model.dart';
@@ -43,6 +45,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
   DateTime? _lastAutoPlayedTimestamp; // Track timestamp to handle message ordering
   StreamSubscription? _messageSubscription;
   StreamSubscription? _playerStateSubscription;
+  StreamSubscription<String>? _notificationTapSubscription;
   final BackgroundAudioService _backgroundService = BackgroundAudioService();
   String? _channelName;
   bool _isPlayingArchivedMessage = false;
@@ -54,8 +57,27 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
     WidgetsBinding.instance.addObserver(this);
     _audioPlayer = AudioPlayer();
     _backgroundService.initialize();
+    // Initialize timestamp to NOW so only NEW messages arriving after this point are auto-played
+    _lastAutoPlayedTimestamp = DateTime.now();
     _setupAutoPlayListener();
     _setupPlayerStateListener();
+    _setupNotificationTapListener();
+  }
+
+  /// Listen for notification taps to switch channels
+  void _setupNotificationTapListener() {
+    _notificationTapSubscription = notificationTapStream.listen((channelId) {
+      debugPrint('ChannelDetail: Notification tap received for channel: $channelId');
+      if (mounted && channelId.isNotEmpty && channelId != widget.channelId) {
+        // Navigate to different channel
+        debugPrint('ChannelDetail: Switching to channel: $channelId');
+        context.goNamed(
+          'channelDetail',
+          pathParameters: {'channelId': channelId},
+        );
+      }
+      // If same channel, do nothing - we're already here
+    });
   }
 
   @override
@@ -65,6 +87,8 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
     _messageSubscription = null;
     _playerStateSubscription?.cancel();
     _playerStateSubscription = null;
+    _notificationTapSubscription?.cancel();
+    _notificationTapSubscription = null;
     _audioPlayer?.dispose();
     _audioPlayer = null;
     super.dispose();
@@ -272,11 +296,45 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
     }
   }
 
+  /// Show emergency warning dialog
+  void _showEmergencyWarning() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 28),
+            const SizedBox(width: 8),
+            const Text('Warning'),
+          ],
+        ),
+        content: const Text(
+          'This service is not for emergency communication.\n\n'
+          'This is a walkie-talkie service only. For two-way communication, please use your cellular mobile.\n\n'
+          'In case of a real emergency, please contact your local emergency services (999, 16263) immediately.',
+          style: TextStyle(fontSize: 15, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('I Understand'),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Show bottom sheet with online users list
   void _showOnlineUsersSheet(String channelId) {
     final currentUser = ref.read(authStateProvider).value;
     final membersAsync = ref.read(liveRoomMembersProvider(channelId));
     final members = membersAsync.valueOrNull ?? [];
+
+    // Debug: Log members being displayed
+    debugPrint('OnlineUsersSheet: Total members from provider: ${members.length}');
+    for (final m in members) {
+      debugPrint('OnlineUsersSheet: - ${m.userId}: "${m.displayName}" (len=${m.displayName.length})');
+    }
 
     // Filter out current user
     final onlineMembers = members.where((m) => m.userId != currentUser?.uid).toList();
@@ -319,6 +377,14 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
                   ],
                 ),
               ),
+              // DEBUG: Show raw data
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  'DEBUG: ${onlineMembers.map((m) => m.displayName).join(", ")}',
+                  style: TextStyle(fontSize: 10, color: Colors.grey),
+                ),
+              ),
               const Divider(height: 1),
               // User list
               if (onlineMembers.isEmpty)
@@ -342,6 +408,13 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
                     itemCount: onlineMembers.length,
                     itemBuilder: (context, index) {
                       final member = onlineMembers[index];
+                      // Debug: Log each member being built
+                      debugPrint('ListView item $index: displayName="${member.displayName}" len=${member.displayName.length}');
+                      // Get display name - use full name if available, otherwise show "User"
+                      final name = member.displayName.length > 1
+                          ? member.displayName
+                          : 'User ${index + 1}';
+                      debugPrint('ListView item $index: using name="$name"');
                       return ListTile(
                         leading: CircleAvatar(
                           backgroundColor: AppColors.primary,
@@ -350,8 +423,8 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
                               : null,
                           child: member.photoUrl?.isNotEmpty != true
                               ? Text(
-                                  member.displayName.isNotEmpty
-                                      ? member.displayName[0].toUpperCase()
+                                  name.isNotEmpty
+                                      ? name[0].toUpperCase()
                                       : '?',
                                   style: const TextStyle(
                                     color: Colors.white,
@@ -361,8 +434,11 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
                               : null,
                         ),
                         title: Text(
-                          member.displayName,
-                          style: const TextStyle(fontWeight: FontWeight.w500),
+                          name,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w500,
+                            fontSize: 16,
+                          ),
                         ),
                         trailing: Container(
                           width: 10,
@@ -638,13 +714,13 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
                       ),
                     ),
                     const SizedBox(width: 4),
-                    // Show connection status only
+                    // Show user-friendly status text
                     Text(
                       (session?.isConnected ?? false)
-                          ? 'Connected'
+                          ? 'Ready • Hold to talk'
                           : (session?.isConnecting ?? false)
                               ? 'Connecting...'
-                              : 'Disconnected',
+                              : 'Tap to reconnect',
                       style: TextStyle(
                         fontSize: 14,
                         color: (session?.isConnected ?? false)
@@ -678,13 +754,18 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
         : null;
     final isMuted = session?.isMuted ?? false;
 
-    // Get online users count (excluding current user)
+    // Get online users count (including current user since we're also online)
     final currentUser = ref.watch(authStateProvider).value;
     final membersAsync = AppConstants.useLiveStreaming
         ? ref.watch(liveRoomMembersProvider(channel.id))
         : null;
     final members = membersAsync?.valueOrNull ?? [];
-    final onlineCount = members.where((m) => m.userId != currentUser?.uid).length;
+    // Online count includes everyone in the room (including self)
+    final onlineCount = members.length;
+    // Total channel members (including self)
+    final totalMembers = channel.memberIds.isNotEmpty
+        ? channel.memberIds.length
+        : channel.memberCount;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
@@ -717,7 +798,9 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
                   const Icon(Icons.people, color: Colors.green, size: 18),
                   const SizedBox(width: 6),
                   Text(
-                    '$onlineCount online',
+                    totalMembers > 0
+                        ? '$onlineCount/$totalMembers online'
+                        : '$onlineCount online',
                     style: const TextStyle(
                       color: Colors.green,
                       fontWeight: FontWeight.w600,
@@ -728,34 +811,37 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
             ),
           ),
           // Emergency button
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.red.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.warning, color: Colors.red, size: 18),
-                const SizedBox(width: 6),
-                const Text(
-                  'Emergency',
-                  style: TextStyle(
-                    color: Colors.red,
-                    fontWeight: FontWeight.w600,
+          GestureDetector(
+            onTap: () => _showEmergencyWarning(),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.red.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.warning, color: Colors.red, size: 18),
+                  const SizedBox(width: 6),
+                  const Text(
+                    'Emergency',
+                    style: TextStyle(
+                      color: Colors.red,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 4),
-                Container(
-                  padding: const EdgeInsets.all(2),
-                  decoration: BoxDecoration(
-                    color: Colors.orange,
-                    shape: BoxShape.circle,
+                  const SizedBox(width: 4),
+                  Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: BoxDecoration(
+                      color: Colors.orange,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.lock, color: Colors.white, size: 12),
                   ),
-                  child: const Icon(Icons.lock, color: Colors.white, size: 12),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ],

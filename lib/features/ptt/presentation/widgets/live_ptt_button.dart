@@ -224,7 +224,9 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
                         Text(
                           session.allListening
                               ? 'All ${session.listenerCount}'
-                              : '${session.listenerCount}',
+                              : (session.totalRoomMembers > 0
+                                  ? '${session.listenerCount}/${session.totalRoomMembers}'
+                                  : '${session.listenerCount}'),
                           style: TextStyle(
                             fontSize: widget.size * 0.05,
                             color: Colors.green,
