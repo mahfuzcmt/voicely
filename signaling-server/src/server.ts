@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
 import { RoomManager } from './services/RoomManager';
 import { FloorController } from './services/FloorController';
+import { fcmService } from './services/FcmService';
 import { initializeFirebase, handleAuth, isAuthenticated } from './handlers/auth';
 import { handleJoinRoom, handleLeaveRoom, handleDisconnect } from './handlers/room';
 import { handleRequestFloor, handleReleaseFloor } from './handlers/floor';
@@ -342,6 +343,10 @@ function sendError(ws: AuthenticatedWebSocket, code: string, message: string): v
 export function startServer(): void {
   // Initialize Firebase
   initializeFirebase();
+
+  // Initialize FCM service for push notifications
+  // This must be called after Firebase is initialized
+  fcmService.initialize();
 
   server.listen(PORT, () => {
     console.log(`Signaling server running on port ${PORT}`);

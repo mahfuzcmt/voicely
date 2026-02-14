@@ -49,10 +49,10 @@ class _ChannelsScreenState extends ConsumerState<ChannelsScreen> {
               padding: const EdgeInsets.all(8.0),
               child: CircleAvatar(
                 backgroundColor: AppColors.primary,
-                backgroundImage: user?.photoUrl != null
+                backgroundImage: user?.photoUrl?.isNotEmpty == true
                     ? NetworkImage(user!.photoUrl!)
                     : null,
-                child: user?.photoUrl == null
+                child: user?.photoUrl?.isNotEmpty != true
                     ? Text(
                         user?.displayName.isNotEmpty == true
                             ? user!.displayName[0].toUpperCase()
@@ -89,13 +89,20 @@ class _ChannelsScreenState extends ConsumerState<ChannelsScreen> {
             children: [
               const Icon(Icons.error_outline, size: 64, color: AppColors.error),
               const SizedBox(height: 16),
-              Text('Error loading channels'),
+              const Text(
+                'Unable to load channels',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+              ),
               const SizedBox(height: 8),
-              Text(error.toString()),
+              const Text(
+                'Please check your connection and try again',
+                style: TextStyle(color: Colors.grey),
+              ),
               const SizedBox(height: 16),
-              ElevatedButton(
+              ElevatedButton.icon(
                 onPressed: () => ref.invalidate(userChannelsProvider),
-                child: const Text('Retry'),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Retry'),
               ),
             ],
           ),

@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:just_audio/just_audio.dart';
-import 'package:intl/intl.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/background_audio_service.dart';
 import '../../../../core/theme/app_colors.dart';
@@ -36,30 +35,78 @@ class ChannelDetailScreen extends ConsumerStatefulWidget {
       _ChannelDetailScreenState();
 }
 
-class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
+class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
+    with WidgetsBindingObserver {
   AudioPlayer? _audioPlayer;
   String? _currentlyPlayingId;
   String? _lastAutoPlayedMessageId;
+  DateTime? _lastAutoPlayedTimestamp; // Track timestamp to handle message ordering
   StreamSubscription? _messageSubscription;
+  StreamSubscription? _playerStateSubscription;
   final BackgroundAudioService _backgroundService = BackgroundAudioService();
   String? _channelName;
+  bool _isPlayingArchivedMessage = false;
+  bool _autoPlayListenerSetup = false; // Guard against duplicate setup
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _audioPlayer = AudioPlayer();
     _backgroundService.initialize();
     _setupAutoPlayListener();
+    _setupPlayerStateListener();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _messageSubscription?.cancel();
+    _messageSubscription = null;
+    _playerStateSubscription?.cancel();
+    _playerStateSubscription = null;
     _audioPlayer?.dispose();
+    _audioPlayer = null;
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      debugPrint('ChannelDetail: App resumed, refreshing messages');
+      // Invalidate the messages provider to force a fresh fetch
+      ref.invalidate(channelMessagesProvider(widget.channelId));
+      // Reset auto-play listener to pick up new messages
+      _autoPlayListenerSetup = false;
+      _setupAutoPlayListener();
+    }
+  }
+
+  void _setupPlayerStateListener() {
+    _playerStateSubscription = _audioPlayer?.playerStateStream.listen((state) {
+      if (state.processingState == ProcessingState.completed) {
+        if (mounted) {
+          setState(() {
+            _currentlyPlayingId = null;
+            _isPlayingArchivedMessage = false;
+          });
+        }
+      }
+    });
+  }
+
   void _setupAutoPlayListener() {
+    // Always cancel any existing subscription first to prevent leaks
+    _messageSubscription?.cancel();
+    _messageSubscription = null;
+
+    // Guard against duplicate subscription within same lifecycle
+    if (_autoPlayListenerSetup) {
+      debugPrint('Auto-play listener already set up, skipping');
+      return;
+    }
+    _autoPlayListenerSetup = true;
+
     final currentUser = ref.read(authStateProvider).value;
     if (currentUser == null) return;
 
@@ -67,11 +114,34 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
     _messageSubscription = messageRepo.getChannelMessages(widget.channelId).listen((messages) {
       if (messages.isEmpty) return;
 
-      final latestMessage = messages.first;
+      // Find the actual latest message by timestamp (don't assume ordering)
+      MessageModel? latestMessage;
+      for (final msg in messages) {
+        final msgTimestamp = msg.timestamp;
+        if (msgTimestamp == null) continue;
+        final latestTimestamp = latestMessage?.timestamp;
+        if (latestMessage == null || latestTimestamp == null || msgTimestamp.isAfter(latestTimestamp)) {
+          latestMessage = msg;
+        }
+      }
+      if (latestMessage == null || latestMessage.timestamp == null) return;
 
-      // Skip if it's our own message or already auto-played
+      // Skip if it's our own message or already auto-played (by ID or timestamp)
       if (latestMessage.senderId == currentUser.uid ||
           latestMessage.id == _lastAutoPlayedMessageId) {
+        return;
+      }
+
+      // Skip if this message is older than or equal to the last auto-played
+      if (_lastAutoPlayedTimestamp != null &&
+          !latestMessage.timestamp!.isAfter(_lastAutoPlayedTimestamp!)) {
+        return;
+      }
+
+      // Skip if currently in a live broadcast (listening or broadcasting)
+      final session = ref.read(livePttSessionProvider(widget.channelId));
+      if (session.isListening || session.isBroadcasting) {
+        debugPrint('Auto-play skipped: currently in live broadcast');
         return;
       }
 
@@ -84,6 +154,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
           latestMessage.type == MessageType.audio) {
         debugPrint('Auto-playing message: ${latestMessage.id}');
         _lastAutoPlayedMessageId = latestMessage.id;
+        _lastAutoPlayedTimestamp = latestMessage.timestamp;
         // Use background service for auto-play (works when screen is locked)
         _backgroundService.playAudio(
           audioUrl: latestMessage.audioUrl!,
@@ -91,57 +162,225 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
           channelName: _channelName ?? 'Channel',
         );
         if (mounted) {
-          setState(() => _currentlyPlayingId = latestMessage.id);
+          setState(() => _currentlyPlayingId = latestMessage!.id);
         }
       }
     });
   }
 
-  Future<void> _playAudio(MessageModel message) async {
+  Future<void> _playAudio(MessageModel message, {bool isArchived = false}) async {
     if (message.audioUrl == null) return;
 
     // If already playing this message, stop it
     if (_currentlyPlayingId == message.id) {
       await _audioPlayer?.stop();
-      setState(() => _currentlyPlayingId = null);
+      setState(() {
+        _currentlyPlayingId = null;
+        _isPlayingArchivedMessage = false;
+      });
       return;
     }
 
     try {
-      setState(() => _currentlyPlayingId = message.id);
+      setState(() {
+        _currentlyPlayingId = message.id;
+        _isPlayingArchivedMessage = isArchived;
+      });
 
       await _audioPlayer?.stop();
       await _audioPlayer?.setUrl(message.audioUrl!);
       await _audioPlayer?.play();
-
-      // Wait for playback to complete
-      _audioPlayer?.playerStateStream.listen((state) {
-        if (state.processingState == ProcessingState.completed) {
-          if (mounted) {
-            setState(() => _currentlyPlayingId = null);
-          }
-        }
-      });
     } catch (e) {
       debugPrint('Error playing audio: $e');
       if (mounted) {
-        setState(() => _currentlyPlayingId = null);
+        setState(() {
+          _currentlyPlayingId = null;
+          _isPlayingArchivedMessage = false;
+        });
         context.showSnackBar('Failed to play audio', isError: true);
       }
     }
   }
 
-  void _showMessageHistory() {
+  /// Stop ALL audio playback when live broadcast starts
+  /// This includes both the replay audio player and the background service auto-play
+  Future<void> _stopAllAudioPlayback() async {
+    debugPrint('Stopping all audio playback for incoming broadcast');
+
+    // Stop the replay audio player
+    if (_audioPlayer?.playing == true) {
+      await _audioPlayer?.stop();
+    }
+
+    // Stop the background service audio (auto-play)
+    if (_backgroundService.isPlaying) {
+      await _backgroundService.stop();
+    }
+
+    // Reset state
+    if (mounted) {
+      setState(() {
+        _currentlyPlayingId = null;
+        _isPlayingArchivedMessage = false;
+      });
+    }
+  }
+
+  /// Play the last recorded message
+  Future<void> _playLastMessage() async {
+    final messageRepo = ref.read(messageRepositoryProvider);
+
+    try {
+      // Get the last audio message from the channel
+      final messages = await messageRepo.getChannelMessages(widget.channelId).first;
+
+      if (messages.isEmpty) {
+        if (mounted) {
+          context.showSnackBar('No messages to replay');
+        }
+        return;
+      }
+
+      // Find the last audio message
+      final lastAudioMessage = messages.firstWhere(
+        (m) => m.type == MessageType.audio && m.audioUrl != null,
+        orElse: () => messages.first,
+      );
+
+      if (lastAudioMessage.audioUrl == null) {
+        if (mounted) {
+          context.showSnackBar('No audio messages to replay');
+        }
+        return;
+      }
+
+      // Check if currently in a live broadcast - don't play if listening
+      final session = ref.read(livePttSessionProvider(widget.channelId));
+      if (session.isListening) {
+        if (mounted) {
+          context.showSnackBar('Cannot replay during live broadcast');
+        }
+        return;
+      }
+
+      await _playAudio(lastAudioMessage, isArchived: true);
+    } catch (e) {
+      debugPrint('Error getting last message: $e');
+      if (mounted) {
+        context.showSnackBar('Failed to get last message', isError: true);
+      }
+    }
+  }
+
+  /// Show bottom sheet with online users list
+  void _showOnlineUsersSheet(String channelId) {
+    final currentUser = ref.read(authStateProvider).value;
+    final membersAsync = ref.read(liveRoomMembersProvider(channelId));
+    final members = membersAsync.valueOrNull ?? [];
+
+    // Filter out current user
+    final onlineMembers = members.where((m) => m.userId != currentUser?.uid).toList();
+
     showModalBottomSheet(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => _MessageHistorySheet(
-        channelId: widget.channelId,
-        channelName: _channelName ?? 'Channel',
-        onPlayMessage: _playAudio,
-        currentlyPlayingId: _currentlyPlayingId,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Handle bar
+              Container(
+                margin: const EdgeInsets.only(top: 12),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              // Title
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    const Icon(Icons.people, color: Colors.green),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Online Users (${onlineMembers.length})',
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              // User list
+              if (onlineMembers.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(32),
+                  child: Text(
+                    'No other users online',
+                    style: TextStyle(
+                      color: Colors.grey,
+                      fontSize: 16,
+                    ),
+                  ),
+                )
+              else
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.of(context).size.height * 0.4,
+                  ),
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: onlineMembers.length,
+                    itemBuilder: (context, index) {
+                      final member = onlineMembers[index];
+                      return ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: AppColors.primary,
+                          backgroundImage: member.photoUrl?.isNotEmpty == true
+                              ? NetworkImage(member.photoUrl!)
+                              : null,
+                          child: member.photoUrl?.isNotEmpty != true
+                              ? Text(
+                                  member.displayName.isNotEmpty
+                                      ? member.displayName[0].toUpperCase()
+                                      : '?',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                )
+                              : null,
+                        ),
+                        title: Text(
+                          member.displayName,
+                          style: const TextStyle(fontWeight: FontWeight.w500),
+                        ),
+                        trailing: Container(
+                          width: 10,
+                          height: 10,
+                          decoration: const BoxDecoration(
+                            color: Colors.green,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              const SizedBox(height: 16),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -150,13 +389,56 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
     final channelAsync = ref.watch(channelProvider(widget.channelId));
     final autoPlayEnabled = ref.watch(autoPlayEnabledProvider);
 
+    // Listen for incoming broadcast to stop all audio playback
+    ref.listen<LivePttSessionState>(
+      livePttSessionProvider(widget.channelId),
+      (previous, next) {
+        // When someone starts broadcasting (we start listening), stop all audio
+        if (previous?.isListening != true && next.isListening == true) {
+          _stopAllAudioPlayback();
+        }
+        // Also stop when WE start broadcasting
+        if (previous?.isBroadcasting != true && next.isBroadcasting == true) {
+          _stopAllAudioPlayback();
+        }
+      },
+    );
+
     return channelAsync.when(
       loading: () => const Scaffold(
         body: Center(child: CircularProgressIndicator()),
       ),
       error: (error, _) => Scaffold(
-        appBar: AppBar(),
-        body: Center(child: Text('Error: $error')),
+        appBar: AppBar(
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error_outline, size: 48, color: AppColors.error),
+              const SizedBox(height: 16),
+              const Text(
+                'Unable to load channel',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Please check your connection',
+                style: TextStyle(color: Colors.grey),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton.icon(
+                onPressed: () => ref.invalidate(channelProvider(widget.channelId)),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Retry'),
+              ),
+            ],
+          ),
+        ),
       ),
       data: (channel) {
         if (channel == null) {
@@ -256,21 +538,29 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
               ),
             ),
           const Spacer(),
-          // Archive/Message history button
+          // Replay last message button
           IconButton(
             icon: Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: AppColors.primary,
+                color: _isPlayingArchivedMessage ? Colors.green : AppColors.primary,
                 shape: BoxShape.circle,
               ),
-              child: const Icon(
-                Icons.chat_bubble,
+              child: Icon(
+                _isPlayingArchivedMessage ? Icons.stop : Icons.replay,
                 color: Colors.white,
                 size: 20,
               ),
             ),
-            onPressed: _showMessageHistory,
+            onPressed: _isPlayingArchivedMessage
+                ? () async {
+                    await _audioPlayer?.stop();
+                    setState(() {
+                      _currentlyPlayingId = null;
+                      _isPlayingArchivedMessage = false;
+                    });
+                  }
+                : _playLastMessage,
           ),
         ],
       ),
@@ -281,15 +571,6 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
     final session = AppConstants.useLiveStreaming
         ? ref.watch(livePttSessionProvider(channel.id))
         : null;
-
-    // Watch online members count - exclude current user
-    final currentUser = ref.watch(authStateProvider).value;
-    final membersAsync = AppConstants.useLiveStreaming
-        ? ref.watch(liveRoomMembersProvider(channel.id))
-        : null;
-    final members = membersAsync?.valueOrNull ?? [];
-    // Filter out current user from online count
-    final onlineCount = members.where((m) => m.userId != currentUser?.uid).length;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
@@ -357,10 +638,10 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
                       ),
                     ),
                     const SizedBox(width: 4),
-                    // Show user count or connection status
+                    // Show connection status only
                     Text(
                       (session?.isConnected ?? false)
-                          ? (onlineCount > 0 ? '$onlineCount online' : 'Available')
+                          ? 'Connected'
                           : (session?.isConnecting ?? false)
                               ? 'Connecting...'
                               : 'Disconnected',
@@ -421,26 +702,29 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen> {
               );
             },
           ),
-          // Online users count in the middle
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.green.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.people, color: Colors.green, size: 18),
-                const SizedBox(width: 6),
-                Text(
-                  '$onlineCount online',
-                  style: const TextStyle(
-                    color: Colors.green,
-                    fontWeight: FontWeight.w600,
+          // Online users count in the middle - clickable to show user list
+          GestureDetector(
+            onTap: () => _showOnlineUsersSheet(channel.id),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.green.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.people, color: Colors.green, size: 18),
+                  const SizedBox(width: 6),
+                  Text(
+                    '$onlineCount online',
+                    style: const TextStyle(
+                      color: Colors.green,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
           // Emergency button
@@ -588,282 +872,6 @@ class _ActionButton extends StatelessWidget {
   }
 }
 
-// Message history bottom sheet
-class _MessageHistorySheet extends ConsumerWidget {
-  final String channelId;
-  final String channelName;
-  final Function(MessageModel) onPlayMessage;
-  final String? currentlyPlayingId;
-
-  const _MessageHistorySheet({
-    required this.channelId,
-    required this.channelName,
-    required this.onPlayMessage,
-    this.currentlyPlayingId,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final messagesAsync = ref.watch(channelMessagesProvider(channelId));
-    final currentUser = ref.read(authStateProvider).value;
-
-    return DraggableScrollableSheet(
-      initialChildSize: 0.9,
-      minChildSize: 0.5,
-      maxChildSize: 0.95,
-      builder: (context, scrollController) {
-        return Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          child: Column(
-            children: [
-              // Handle bar
-              Container(
-                margin: const EdgeInsets.only(top: 12),
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.grey[300],
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              // Header
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.close),
-                      onPressed: () => Navigator.pop(context),
-                    ),
-                    // Channel avatar
-                    CircleAvatar(
-                      radius: 18,
-                      backgroundColor: AppColors.surfaceDark,
-                      child: Text(
-                        channelName.isNotEmpty ? channelName[0].toUpperCase() : 'C',
-                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          channelName,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                          ),
-                        ),
-                        const Text(
-                          'Available',
-                          style: TextStyle(
-                            color: Colors.green,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              const Divider(height: 1),
-              // Messages list
-              Expanded(
-                child: messagesAsync.when(
-                  loading: () => const Center(child: CircularProgressIndicator()),
-                  error: (error, _) => Center(
-                    child: Text('Error: $error'),
-                  ),
-                  data: (messages) {
-                    if (messages.isEmpty) {
-                      return const Center(
-                        child: Text(
-                          'No messages yet',
-                          style: TextStyle(color: Colors.grey),
-                        ),
-                      );
-                    }
-                    return ListView.builder(
-                      controller: scrollController,
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                      itemCount: messages.length,
-                      itemBuilder: (context, index) {
-                        final message = messages[index];
-                        final isMe = message.senderId == currentUser?.uid;
-                        final isPlaying = currentlyPlayingId == message.id;
-
-                        return _buildMessageBubble(context, message, isMe, isPlaying);
-                      },
-                    );
-                  },
-                ),
-              ),
-              // Playback controls
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                  border: Border(top: BorderSide(color: Colors.grey[200]!)),
-                ),
-                child: Row(
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.skip_previous),
-                      color: Colors.grey,
-                      onPressed: () {},
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.play_arrow),
-                      color: Colors.grey,
-                      onPressed: () {},
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.skip_next),
-                      color: Colors.grey,
-                      onPressed: () {},
-                    ),
-                    const Spacer(),
-                    const Text('1x', style: TextStyle(color: Colors.grey)),
-                  ],
-                ),
-              ),
-              // Input area
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  border: Border(top: BorderSide(color: Colors.grey[200]!)),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.grey[100],
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(Icons.add, color: Colors.grey),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                        decoration: BoxDecoration(
-                          color: Colors.grey[100],
-                          borderRadius: BorderRadius.circular(24),
-                        ),
-                        child: const Text(
-                          'Message',
-                          style: TextStyle(color: Colors.grey),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.orange.withValues(alpha: 0.1),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.orange, width: 2),
-                      ),
-                      child: const Icon(Icons.mic, color: Colors.orange),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildMessageBubble(BuildContext context, MessageModel message, bool isMe, bool isPlaying) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Column(
-        crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-        children: [
-          // Date separator (simplified)
-          if (message == message) // Placeholder for actual date logic
-            Container(),
-
-          Row(
-            mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-            children: [
-              GestureDetector(
-                onTap: () => onPlayMessage(message),
-                child: Container(
-                  constraints: BoxConstraints(
-                    maxWidth: MediaQuery.of(context).size.width * 0.7,
-                  ),
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: isMe ? AppColors.primary : Colors.grey[200],
-                    borderRadius: BorderRadius.circular(20),
-                    border: isPlaying ? Border.all(color: AppColors.primary, width: 2) : null,
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        isPlaying ? Icons.stop : Icons.play_arrow,
-                        color: isMe ? Colors.white : Colors.black54,
-                        size: 20,
-                      ),
-                      const SizedBox(width: 8),
-                      // Waveform placeholder
-                      Flexible(
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: List.generate(15, (i) => Container(
-                            width: 2,
-                            height: (i % 3 + 1) * 4.0 + 4,
-                            margin: const EdgeInsets.symmetric(horizontal: 1),
-                            decoration: BoxDecoration(
-                              color: isMe ? Colors.white.withValues(alpha: 0.7) : Colors.black38,
-                              borderRadius: BorderRadius.circular(1),
-                            ),
-                          )),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        '${(message.audioDuration ?? 0) ~/ 60}:${((message.audioDuration ?? 0) % 60).toString().padLeft(2, '0')}',
-                        style: TextStyle(
-                          color: isMe ? Colors.white : Colors.black87,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-          // Time
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-              _formatTime(message.timestamp),
-              style: TextStyle(
-                fontSize: 11,
-                color: Colors.grey[500],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _formatTime(DateTime? timestamp) {
-    if (timestamp == null) return '';
-    return DateFormat('h:mm a').format(timestamp);
-  }
-}
 
 // Animated speaker icon with sound waves
 class _AnimatedSpeakerIcon extends StatefulWidget {

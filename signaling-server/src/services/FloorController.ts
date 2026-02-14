@@ -1,4 +1,5 @@
 import { RoomManager } from './RoomManager';
+import { fcmService } from './FcmService';
 import {
   AuthenticatedWebSocket,
   FloorState,
@@ -93,8 +94,18 @@ export class FloorController {
     this.roomManager.setFloorState(roomId, floorState);
     this.setupFloorTimeout(roomId, userId, expiresAt);
 
-    // Notify other room members
+    // Notify other room members via WebSocket
     this.broadcastFloorTaken(roomId, floorState, userId);
+
+    // CRITICAL: Send high-priority FCM to wake up sleeping devices
+    // This runs async and doesn't block the response
+    fcmService.notifyLiveBroadcastStarted({
+      channelId: roomId,
+      speakerId: userId,
+      speakerName: displayName,
+    }).catch((err) => {
+      console.error('FCM notification failed:', err);
+    });
 
     return {
       granted: true,
@@ -117,12 +128,23 @@ export class FloorController {
       return false;
     }
 
+    const speakerName = currentFloor.speakerName;
+
     // Clear the floor
     this.roomManager.setFloorState(roomId, null);
     this.roomManager.clearFloorTimeout(roomId);
 
-    // Notify all room members
+    // Notify all room members via WebSocket
     this.broadcastFloorReleased(roomId);
+
+    // Send FCM notification that broadcast ended (lower priority)
+    fcmService.notifyLiveBroadcastEnded({
+      channelId: roomId,
+      speakerId: userId,
+      speakerName,
+    }).catch((err) => {
+      console.error('FCM end notification failed:', err);
+    });
 
     console.log(`Floor released by ${userId} in room ${roomId}`);
     return true;

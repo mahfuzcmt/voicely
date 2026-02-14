@@ -121,17 +121,26 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
         ],
 
         // Main PTT button with new design - tap to toggle
-        GestureDetector(
-          onTap: _onTapToggle,
-          child: AnimatedBuilder(
-            animation: _pulseAnimation,
-            builder: (context, child) {
-              return Transform.scale(
-                scale: session.isBroadcasting ? _pulseAnimation.value : 1.0,
-                child: child,
-              );
-            },
-            child: _buildPttButtonDesign(session),
+        Semantics(
+          button: true,
+          enabled: session.state != LivePttState.error,
+          label: session.isBroadcasting
+              ? 'Stop broadcasting. Tap to release'
+              : session.isListening
+                  ? 'Someone is speaking. Tap to request floor'
+                  : 'Push to talk button. Tap to start broadcasting',
+          child: GestureDetector(
+            onTap: _onTapToggle,
+            child: AnimatedBuilder(
+              animation: _pulseAnimation,
+              builder: (context, child) {
+                return Transform.scale(
+                  scale: session.isBroadcasting ? _pulseAnimation.value : 1.0,
+                  child: child,
+                );
+              },
+              child: _buildPttButtonDesign(session),
+            ),
           ),
         ),
       ],
@@ -213,7 +222,9 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
                         ),
                         SizedBox(width: widget.size * 0.01),
                         Text(
-                          '${session.listenerCount}',
+                          session.allListening
+                              ? 'All ${session.listenerCount}'
+                              : '${session.listenerCount}',
                           style: TextStyle(
                             fontSize: widget.size * 0.05,
                             color: Colors.green,

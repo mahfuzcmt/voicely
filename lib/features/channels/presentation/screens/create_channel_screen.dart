@@ -43,7 +43,7 @@ class _CreateChannelScreenState extends ConsumerState<CreateChannelScreen> {
       final state = ref.read(channelNotifierProvider);
       if (state.hasError) {
         context.showSnackBar(
-          state.error.toString(),
+          'Failed to create channel. Please try again.',
           isError: true,
         );
       } else if (channel != null) {

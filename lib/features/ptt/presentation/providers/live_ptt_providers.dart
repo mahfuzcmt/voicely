@@ -6,6 +6,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../../../core/services/background_ptt_service.dart';
+import '../../../../core/services/fcm_ptt_service.dart';
 import '../../../../core/services/native_audio_service.dart';
 import '../../../../di/providers.dart';
 import '../../../messaging/data/message_repository.dart';
@@ -52,8 +53,10 @@ class LivePttSessionState {
   final int audioTracksReceived;
   final bool onTrackFired;
   final String? iceState;
-  // Listener count when broadcasting
+  // Listener count when broadcasting (WebRTC connected)
   final int listenerCount;
+  // Total room members (excluding self)
+  final int totalRoomMembers;
 
   const LivePttSessionState({
     this.state = LivePttState.disconnected,
@@ -68,7 +71,11 @@ class LivePttSessionState {
     this.onTrackFired = false,
     this.iceState,
     this.listenerCount = 0,
+    this.totalRoomMembers = 0,
   });
+
+  /// Check if all room members are listening
+  bool get allListening => listenerCount > 0 && listenerCount >= totalRoomMembers;
 
   /// Use a sentinel value to distinguish "not provided" from "set to null"
   static const _sentinel = Object();
@@ -86,6 +93,7 @@ class LivePttSessionState {
     bool? onTrackFired,
     String? iceState,
     int? listenerCount,
+    int? totalRoomMembers,
   }) {
     return LivePttSessionState(
       state: state ?? this.state,
@@ -108,6 +116,7 @@ class LivePttSessionState {
       onTrackFired: onTrackFired ?? this.onTrackFired,
       iceState: iceState ?? this.iceState,
       listenerCount: listenerCount ?? this.listenerCount,
+      totalRoomMembers: totalRoomMembers ?? this.totalRoomMembers,
     );
   }
 
@@ -161,7 +170,8 @@ final wsConnectionProvider = FutureProvider<bool>((ref) async {
 
   // Connect if not already connected
   if (!wsService.isConnected) {
-    return wsService.connect(token);
+    // Pass displayName so other users see the full name
+    return wsService.connect(token, displayName: user.displayName);
   }
 
   return true;
@@ -198,10 +208,15 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
   StreamSubscription? _remoteStreamSubscription;
   StreamSubscription? _debugSubscription;
   StreamSubscription? _listenerCountSubscription;
+  StreamSubscription? _fcmBroadcastSubscription;
+  StreamSubscription? _roomMembersSubscription;
   Timer? _broadcastTimer;
   Timer? _autoStopTimer;
   bool _wakelockEnabled = false;
   bool _backgroundServiceStarted = false;
+
+  // FCM service for wake-up notifications
+  final FcmPttService _fcmPttService = FcmPttService();
 
   // Audio recording fields for message archiving
   bool _isRecordingActive = false;
@@ -209,6 +224,12 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
 
   /// Auto-stop broadcasting after 60 seconds to prevent accidental long broadcasts
   static const int _maxBroadcastDurationSeconds = 60;
+
+  // Track if observer was successfully added
+  bool _observerAdded = false;
+
+  // Track if notifier has been disposed (StateNotifier doesn't have 'mounted')
+  bool _isDisposed = false;
 
   LivePttSessionNotifier({
     required Ref ref,
@@ -223,9 +244,55 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
           state: wsService.isConnected ? LivePttState.idle : LivePttState.disconnected,
         )) {
     _setupListeners();
+    _setupFcmWakeUpHandler();
     _autoConnect();
-    // Register for app lifecycle events
-    WidgetsBinding.instance.addObserver(this);
+    // Register for app lifecycle events safely
+    try {
+      WidgetsBinding.instance.addObserver(this);
+      _observerAdded = true;
+    } catch (e) {
+      debugPrint('LivePTT: Failed to add lifecycle observer: $e');
+    }
+    // Check for pending FCM wake-up messages
+    _checkPendingFcmMessage();
+  }
+
+  /// Set up FCM wake-up handler for this channel
+  void _setupFcmWakeUpHandler() {
+    // Set the callback for FCM wake-up
+    _fcmPttService.onWakeUpForBroadcast = (fcmChannelId) async {
+      if (fcmChannelId == channelId) {
+        debugPrint('LivePTT: FCM wake-up for our channel $channelId');
+        // Ensure we're connected and in the room
+        if (!_wsService.isConnected) {
+          debugPrint('LivePTT: Reconnecting for FCM wake-up...');
+          await reconnect();
+        }
+        return _wsService.isConnected;
+      }
+      return false;
+    };
+
+    // Listen for live broadcast started notifications for this channel
+    _fcmBroadcastSubscription = _fcmPttService.onLiveBroadcastStarted
+        .where((msg) => msg.channelId == channelId)
+        .listen((message) {
+      debugPrint('LivePTT: FCM - Live broadcast started by ${message.speakerName}');
+      // The WebSocket will receive the floor state change
+      // This is just for ensuring connection is ready
+    });
+  }
+
+  /// Check for pending FCM messages when initializing
+  Future<void> _checkPendingFcmMessage() async {
+    final pendingMessage = await _fcmPttService.checkPendingMessage();
+    if (pendingMessage != null && pendingMessage.channelId == channelId) {
+      debugPrint('LivePTT: Found pending FCM message for channel $channelId');
+      // Ensure we're connected
+      if (!_wsService.isConnected) {
+        await reconnect();
+      }
+    }
   }
 
   @override
@@ -278,15 +345,43 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       debugPrint('LivePTT: Failed to reconfigure audio: $e');
     }
 
-    // Reconnect WebSocket if disconnected
+    // Always try to reconnect when coming to foreground
+    // The WebSocket might have been disconnected while in background
+    // even if the state hasn't been updated yet
+    debugPrint('LivePTT: Checking WebSocket connection on foreground...');
+
+    // Force a ping to check if connection is really alive
+    if (_wsService.isConnected) {
+      _wsService.sendPing();
+      // Give it a moment to respond
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+
+    // Reconnect if disconnected or if ping didn't get a response
     if (!_wsService.isConnected) {
-      debugPrint('LivePTT: WebSocket disconnected, reconnecting...');
-      await reconnect();
+      debugPrint('LivePTT: WebSocket disconnected, force reconnecting...');
+      // Use force reconnect to ensure clean state
+      await _wsService.forceReconnect();
+      // Wait for connection to establish
+      await Future.delayed(const Duration(milliseconds: 500));
+      // Join room after reconnecting
+      if (_wsService.isConnected) {
+        _wsService.joinRoom(channelId, rejoin: true);
+      }
+    } else {
+      // Rejoin room to ensure we're still in it
+      _wsService.joinRoom(channelId, rejoin: true);
     }
   }
 
   /// Setup listeners for state changes
   void _setupListeners() {
+    // Setup background service ping callback
+    _backgroundService.setOnBackgroundPing(() {
+      debugPrint('LivePTT: Background ping received, sending WebSocket ping');
+      _wsService.sendPing();
+    });
+
     // Listen to WebSocket connection state
     _connectionSubscription = _wsService.connectionState.listen((connState) {
       final newPttState = _mapConnectionToPttState(connState);
@@ -294,6 +389,15 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
         connectionState: connState,
         state: newPttState,
       );
+
+      // Update background service with connection status
+      final isConnected = connState == WSConnectionState.authenticated;
+      _backgroundService.updateConnectionStatus(isConnected);
+      if (!isConnected && connState == WSConnectionState.disconnected) {
+        _backgroundService.notifyDisconnected();
+      } else if (isConnected) {
+        _backgroundService.notifyIdle();
+      }
 
       // Auto-join room when authenticated
       if (connState == WSConnectionState.authenticated) {
@@ -375,32 +479,74 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       );
     });
 
-    // Listen for listener count updates when broadcasting
+    // Listen for listener count updates when broadcasting (WebRTC connections)
     _listenerCountSubscription = _streamingService.listenerCountStream.listen((count) {
-      debugPrint('LivePTT: Listener count updated: $count');
+      debugPrint('LivePTT: WebRTC listener count: $count');
       state = state.copyWith(listenerCount: count);
+    });
+
+    // Listen for room members changes - track total room members
+    _roomMembersSubscription = _wsService.roomMembers.listen((event) {
+      if (event.roomId != channelId) return;
+
+      final members = event.members;
+      // Count all members except self as total room members
+      final currentUserId = _wsService.userId;
+      final totalMembers = members.where((m) => m.userId != currentUserId).length;
+
+      debugPrint('LivePTT: Room members updated: ${members.length} total, $totalMembers others');
+      state = state.copyWith(totalRoomMembers: totalMembers);
     });
   }
 
-  /// Auto-connect to WebSocket server
+  /// Timeout duration for initialization operations
+  static const Duration _initTimeout = Duration(seconds: 10);
+  static const Duration _connectionTimeout = Duration(seconds: 20);
+
+  /// Auto-connect to WebSocket server with timeout protection
   Future<void> _autoConnect() async {
     debugPrint('LivePTT: _autoConnect called for channel $channelId');
 
-    // Start background service for keeping app alive when in background
-    await _startBackgroundService();
+    // Start background service with timeout
+    try {
+      await _startBackgroundService().timeout(
+        _initTimeout,
+        onTimeout: () => debugPrint('LivePTT: Background service start timed out'),
+      );
+    } catch (e) {
+      debugPrint('LivePTT: Background service error: $e');
+    }
 
-    // Enable wakelock to prevent device from sleeping during PTT session
-    await _enableWakelock();
+    // Enable wakelock with timeout
+    try {
+      await _enableWakelock().timeout(
+        _initTimeout,
+        onTimeout: () => debugPrint('LivePTT: Wakelock enable timed out'),
+      );
+    } catch (e) {
+      debugPrint('LivePTT: Wakelock error: $e');
+    }
 
-    // CRITICAL: Request microphone permission first
-    // WebRTC on Android needs this even for receiving audio
+    // Request battery optimization exemption with timeout
+    try {
+      await _requestBatteryOptimizationExemption().timeout(
+        _initTimeout,
+        onTimeout: () => debugPrint('LivePTT: Battery optimization request timed out'),
+      );
+    } catch (e) {
+      debugPrint('LivePTT: Battery optimization error: $e');
+    }
+
+    // CRITICAL: Request microphone permission first with timeout
     debugPrint('LivePTT: Requesting microphone permission...');
     try {
-      // This will trigger permission dialog if not granted
       final stream = await navigator.mediaDevices.getUserMedia({
         'audio': true,
         'video': false,
-      });
+      }).timeout(
+        _initTimeout,
+        onTimeout: () => throw TimeoutException('Microphone permission timed out'),
+      );
       // Immediately stop the stream, we just needed the permission
       for (final track in stream.getTracks()) {
         await track.stop();
@@ -409,14 +555,19 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       debugPrint('LivePTT: Microphone permission granted');
     } catch (e) {
       debugPrint('LivePTT: Microphone permission error: $e');
-      // Don't block - permission might already be granted but getUserMedia failed
-      // for another reason. Continue and let the actual streaming handle errors.
+      // Don't block - continue and let the actual streaming handle errors
     }
 
-    // Configure native audio for voice chat right away
+    // Configure native audio with timeout
     debugPrint('LivePTT: Pre-configuring native audio...');
     try {
-      await NativeAudioService.setAudioModeForVoiceChat();
+      await NativeAudioService.setAudioModeForVoiceChat().timeout(
+        _initTimeout,
+        onTimeout: () {
+          debugPrint('LivePTT: Native audio config timed out');
+          return false;
+        },
+      );
       debugPrint('LivePTT: Native audio pre-configured');
     } catch (e) {
       debugPrint('LivePTT: Native audio pre-config error: $e');
@@ -442,20 +593,42 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     state = state.copyWith(state: LivePttState.connecting);
 
     try {
-      final token = await user.getIdToken();
+      // Get token with timeout
+      final token = await user.getIdToken().timeout(
+        _initTimeout,
+        onTimeout: () => throw TimeoutException('Token fetch timed out'),
+      );
       debugPrint('LivePTT: Got token, length: ${token?.length ?? 0}');
+
       if (token != null) {
-        // Get display name from Firebase user or Firestore
+        // Get display name with timeout
         String? displayName = user.displayName;
         if (displayName == null || displayName.isEmpty) {
-          // Try to get from Firestore
-          final userModel = await _ref.read(currentUserProvider.future);
-          displayName = userModel?.displayName ?? userModel?.phoneNumber;
+          try {
+            final userModel = await _ref.read(currentUserProvider.future).timeout(
+              _initTimeout,
+              onTimeout: () => null,
+            );
+            displayName = userModel?.displayName ?? userModel?.phoneNumber;
+          } catch (e) {
+            debugPrint('LivePTT: Failed to get display name: $e');
+          }
         }
+
         debugPrint('LivePTT: Connecting to WebSocket with displayName: $displayName');
-        await _wsService.connect(token, displayName: displayName);
+        await _wsService.connect(token, displayName: displayName).timeout(
+          _connectionTimeout,
+          onTimeout: () {
+            debugPrint('LivePTT: WebSocket connection timed out');
+            return false;
+          },
+        );
       } else {
         debugPrint('LivePTT: Token is null!');
+        state = state.copyWith(
+          state: LivePttState.error,
+          errorMessage: 'Failed to get auth token',
+        );
       }
     } catch (e) {
       debugPrint('LivePTT: Connection error: $e');
@@ -605,62 +778,103 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       debugPrint('LivePTT Recording: Skipping short recording (${durationSeconds}s)');
       try {
         _ref.read(audioRecordingServiceProvider).cancelRecording();
-      } catch (_) {}
+      } catch (e) {
+        // Log but continue - cancelling a short recording is not critical
+        debugPrint('LivePTT Recording: Error cancelling short recording: $e');
+      }
       return;
     }
 
-    // Fire-and-forget upload
-    () async {
-      try {
-        final audioRecordingService = _ref.read(audioRecordingServiceProvider);
-        final audioStorageService = _ref.read(audioStorageServiceProvider);
-        final messageRepo = _ref.read(messageRepositoryProvider);
+    // Upload with retry logic
+    _uploadRecordingWithRetry(durationSeconds);
+  }
 
-        final audioFilePath = await audioRecordingService.stopRecording();
-        if (audioFilePath == null) {
-          debugPrint('LivePTT Recording: No audio file to upload');
-          return;
-        }
+  /// Upload recording with retry logic (max 3 attempts with exponential backoff)
+  Future<void> _uploadRecordingWithRetry(int durationSeconds, {int attempt = 1}) async {
+    // Check if disposed before starting
+    if (_isDisposed) {
+      debugPrint('LivePTT Recording: Notifier disposed, skipping upload');
+      return;
+    }
 
-        debugPrint('LivePTT Recording: Uploading audio...');
-        final audioUrl = await audioStorageService.uploadAudio(
-          filePath: audioFilePath,
-          channelId: channelId,
-        );
+    const maxAttempts = 3;
 
-        // Get current user info
-        final currentUser = _ref.read(authStateProvider).value;
-        if (currentUser == null) {
-          debugPrint('LivePTT Recording: No user, skipping message creation');
-          return;
-        }
+    try {
+      final audioRecordingService = _ref.read(audioRecordingServiceProvider);
+      final audioStorageService = _ref.read(audioStorageServiceProvider);
+      final messageRepo = _ref.read(messageRepositoryProvider);
 
-        String senderName;
-        String? senderPhotoUrl;
-        try {
-          final userProfile = await _ref.read(currentUserProvider.future);
-          senderName = userProfile?.displayName ??
-              currentUser.displayName ??
-              'User';
-          senderPhotoUrl = userProfile?.photoUrl;
-        } catch (_) {
-          senderName = currentUser.displayName ?? 'User';
-          senderPhotoUrl = null;
-        }
-
-        await messageRepo.sendAudioMessage(
-          channelId: channelId,
-          senderId: currentUser.uid,
-          senderName: senderName,
-          senderPhotoUrl: senderPhotoUrl,
-          audioUrl: audioUrl,
-          durationSeconds: durationSeconds,
-        );
-        debugPrint('LivePTT Recording: Message created successfully');
-      } catch (e) {
-        debugPrint('LivePTT Recording: Error uploading/creating message: $e');
+      final audioFilePath = await audioRecordingService.stopRecording();
+      if (audioFilePath == null) {
+        debugPrint('LivePTT Recording: No audio file to upload');
+        return;
       }
-    }();
+
+      debugPrint('LivePTT Recording: Uploading audio (attempt $attempt/$maxAttempts)...');
+      final audioUrl = await audioStorageService.uploadAudio(
+        filePath: audioFilePath,
+        channelId: channelId,
+      );
+
+      // Get current user info
+      final currentUser = _ref.read(authStateProvider).value;
+      if (currentUser == null) {
+        debugPrint('LivePTT Recording: No user, skipping message creation');
+        return;
+      }
+
+      String senderName;
+      String? senderPhotoUrl;
+      try {
+        final userProfile = await _ref.read(currentUserProvider.future);
+        senderName = userProfile?.displayName ??
+            currentUser.displayName ??
+            'User';
+        senderPhotoUrl = userProfile?.photoUrl;
+      } catch (e) {
+        // Log the error but continue with fallback - getting user profile is not critical
+        debugPrint('LivePTT Recording: Error getting user profile: $e');
+        senderName = currentUser.displayName ?? 'User';
+        senderPhotoUrl = null;
+      }
+
+      await messageRepo.sendAudioMessage(
+        channelId: channelId,
+        senderId: currentUser.uid,
+        senderName: senderName,
+        senderPhotoUrl: senderPhotoUrl,
+        audioUrl: audioUrl,
+        durationSeconds: durationSeconds,
+      );
+      debugPrint('LivePTT Recording: Message created successfully');
+    } catch (e) {
+      debugPrint('LivePTT Recording: Error uploading/creating message (attempt $attempt): $e');
+
+      // Retry with exponential backoff
+      if (attempt < maxAttempts && !_isDisposed) {
+        final delay = Duration(seconds: 1 << (attempt - 1)); // 1s, 2s, 4s
+        debugPrint('LivePTT Recording: Retrying in ${delay.inSeconds}s...');
+        await Future.delayed(delay);
+        // Check if disposed again after delay
+        if (_isDisposed) {
+          debugPrint('LivePTT Recording: Notifier disposed during retry delay');
+          return;
+        }
+        await _uploadRecordingWithRetry(durationSeconds, attempt: attempt + 1);
+      } else if (!_isDisposed) {
+        debugPrint('LivePTT Recording: Max retry attempts reached, giving up');
+        // Update state to show error (optional - notify user)
+        state = state.copyWith(
+          errorMessage: 'Failed to save voice message',
+        );
+        // Clear error after 3 seconds
+        Future.delayed(const Duration(seconds: 3), () {
+          if (!_isDisposed && state.errorMessage == 'Failed to save voice message') {
+            state = state.copyWith(errorMessage: null);
+          }
+        });
+      }
+    }
   }
 
   /// Play remote audio stream
@@ -668,6 +882,19 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
   /// This method just handles UI-level concerns
   Future<void> _playRemoteStream(MediaStream stream) async {
     debugPrint('LivePTT: Remote stream received: ${stream.id}');
+
+    // Validate stream has audio tracks
+    final audioTracks = stream.getAudioTracks();
+    if (audioTracks.isEmpty) {
+      debugPrint('LivePTT: WARNING - Remote stream has no audio tracks!');
+      return;
+    }
+
+    // Validate at least one track is not ended
+    final activeTracks = audioTracks.where((t) => t.enabled || !(t.muted ?? false)).toList();
+    if (activeTracks.isEmpty) {
+      debugPrint('LivePTT: WARNING - All audio tracks are disabled/muted');
+    }
 
     // Ensure wakelock is enabled during playback
     await _enableWakelock();
@@ -680,8 +907,8 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     // Audio tracks are already enabled in LiveStreamingService.onTrack
     // Just log the state for debugging - DO NOT modify track.enabled here
     // to avoid conflicts with the mute state managed by LiveStreamingService
-    for (final track in stream.getAudioTracks()) {
-      debugPrint('LivePTT: Audio track ${track.id} state: enabled=${track.enabled}');
+    for (final track in audioTracks) {
+      debugPrint('LivePTT: Audio track ${track.id} state: enabled=${track.enabled}, muted=${track.muted}');
     }
 
     // Log audio state for debugging
@@ -793,18 +1020,57 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     }
   }
 
+  /// Request battery optimization exemption for background connection
+  Future<void> _requestBatteryOptimizationExemption() async {
+    try {
+      final isDisabled = await NativeAudioService.isBatteryOptimizationDisabled();
+      if (!isDisabled) {
+        debugPrint('LivePTT: Battery optimization is enabled, requesting exemption...');
+        await NativeAudioService.requestDisableBatteryOptimization();
+      } else {
+        debugPrint('LivePTT: Battery optimization already disabled');
+      }
+    } catch (e) {
+      debugPrint('LivePTT: Failed to check/request battery optimization: $e');
+    }
+  }
+
   @override
   void dispose() {
-    // Remove lifecycle observer
-    WidgetsBinding.instance.removeObserver(this);
+    // Mark as disposed first to prevent any pending async operations from modifying state
+    _isDisposed = true;
 
+    // Remove lifecycle observer safely
+    if (_observerAdded) {
+      try {
+        WidgetsBinding.instance.removeObserver(this);
+        _observerAdded = false;
+      } catch (e) {
+        debugPrint('LivePTT: Failed to remove lifecycle observer: $e');
+      }
+    }
+
+    // Cancel all subscriptions
     _connectionSubscription?.cancel();
+    _connectionSubscription = null;
     _streamingStateSubscription?.cancel();
+    _streamingStateSubscription = null;
     _speakerSubscription?.cancel();
+    _speakerSubscription = null;
     _floorSubscription?.cancel();
+    _floorSubscription = null;
     _remoteStreamSubscription?.cancel();
+    _remoteStreamSubscription = null;
     _debugSubscription?.cancel();
+    _debugSubscription = null;
     _listenerCountSubscription?.cancel();
+    _listenerCountSubscription = null;
+    _roomMembersSubscription?.cancel();
+    _roomMembersSubscription = null;
+    _fcmBroadcastSubscription?.cancel();
+    _fcmBroadcastSubscription = null;
+    // Clear FCM wake-up callback
+    _fcmPttService.onWakeUpForBroadcast = null;
     _stopBroadcastTimer();
 
     // Stop background service and disable wakelock

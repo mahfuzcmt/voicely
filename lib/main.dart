@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/router/app_router.dart';
 import 'core/services/background_audio_service.dart';
+import 'core/services/fcm_ptt_service.dart';
 import 'core/theme/app_theme.dart';
 import 'firebase_options.dart';
 
@@ -17,8 +18,9 @@ Future<void> main() async {
     options: DefaultFirebaseOptions.currentPlatform,
   );
 
-  // Initialize FCM background handler
-  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+  // Initialize FCM background handler for PTT wake-up
+  // This is critical for receiving live broadcast notifications
+  FirebaseMessaging.onBackgroundMessage(handleFcmPttBackgroundMessage);
 
   // Initialize background audio service
   final backgroundService = BackgroundAudioService();
@@ -80,10 +82,22 @@ class _VoicelyAppState extends ConsumerState<VoicelyApp> {
   }
 
   void _setupFCMListeners() {
-    // Handle foreground messages
+    final fcmPttService = FcmPttService();
+
+    // Handle foreground messages - route through FCM PTT service
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       debugPrint('FCM: Foreground message received: ${message.messageId}');
 
+      // Check if this is a PTT-related message
+      final messageType = message.data['type'] as String?;
+      if (messageType == 'live_broadcast_started' ||
+          messageType == 'live_broadcast_ended') {
+        // Handle through PTT service
+        fcmPttService.handleMessage(message);
+        return;
+      }
+
+      // Legacy handling for voice messages with audio URLs
       final data = message.data;
       final audioUrl = data['audioUrl'];
       final senderName = data['senderName'] ?? 'Someone';
@@ -103,7 +117,8 @@ class _VoicelyAppState extends ConsumerState<VoicelyApp> {
     // Handle notification taps when app is in background
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
       debugPrint('FCM: Message opened app: ${message.messageId}');
-      // Navigate to channel if needed
+      // Handle through PTT service for navigation
+      fcmPttService.handleMessage(message);
     });
   }
 

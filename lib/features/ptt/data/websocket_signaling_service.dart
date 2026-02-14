@@ -266,6 +266,9 @@ class WebSocketSignalingService {
   static const Duration _initialReconnectDelay = Duration(seconds: 1);
   static const int _maxMissedPongs = 3;
 
+  // Connection lock to prevent concurrent connect/disconnect operations
+  bool _isConnecting = false;
+
   // Auth completion tracking
   Completer<bool>? _authCompleter;
 
@@ -318,14 +321,28 @@ class WebSocketSignalingService {
   Future<bool> connect(String authToken, {String? displayName}) async {
     debugPrint('WS: connect() called with displayName: $displayName');
 
+    // Prevent concurrent connection attempts
+    if (_isConnecting) {
+      debugPrint('WS: Connection already in progress, skipping');
+      return false;
+    }
+
     if (_connectionState == WSConnectionState.connecting ||
         _connectionState == WSConnectionState.authenticating) {
       debugPrint('WS: Already connecting/authenticating, skipping');
       return false;
     }
 
+    _isConnecting = true;
     _authToken = authToken;
     _displayName = displayName;
+
+    // Cancel any pending auth completer from previous attempt
+    if (_authCompleter != null && !_authCompleter!.isCompleted) {
+      _authCompleter!.complete(false);
+    }
+    _authCompleter = null;
+
     _updateState(WSConnectionState.connecting);
 
     final serverUrl = AppConstants.signalingServerUrl;
@@ -348,6 +365,7 @@ class WebSocketSignalingService {
       _updateState(WSConnectionState.connected);
 
       // Listen to messages
+      _subscription?.cancel();
       _subscription = _channel!.stream.listen(
         _handleMessage,
         onError: _handleError,
@@ -372,11 +390,9 @@ class WebSocketSignalingService {
         _authTimeout,
         onTimeout: () {
           debugPrint('WS: Auth timed out');
-          _authCompleter = null;
           throw TimeoutException('Authentication timed out', _authTimeout);
         },
       );
-      _authCompleter = null;
 
       if (!authResult) {
         debugPrint('WS: Auth failed');
@@ -393,18 +409,29 @@ class WebSocketSignalingService {
       _updateState(WSConnectionState.error);
       _scheduleReconnect();
       return false;
+    } finally {
+      _isConnecting = false;
+      _authCompleter = null;
     }
   }
 
   /// Disconnect from the server
-  void disconnect() {
+  Future<void> disconnect() async {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _reconnectAttempts = 0;
 
+    // Complete any pending auth with failure
+    if (_authCompleter != null && !_authCompleter!.isCompleted) {
+      _authCompleter!.complete(false);
+    }
+    _authCompleter = null;
+    _isConnecting = false;
+
     _stopHeartbeat();
-    _subscription?.cancel();
-    _channel?.sink.close();
+    await _subscription?.cancel();
+    _subscription = null;
+    await _channel?.sink.close();
     _channel = null;
 
     _joinedRooms.clear();
@@ -539,9 +566,35 @@ class WebSocketSignalingService {
 
   /// Handle incoming messages
   void _handleMessage(dynamic data) {
+    // Validate data is a string
+    if (data is! String) {
+      Logger.e('WebSocket received non-string data: ${data.runtimeType}');
+      return;
+    }
+
+    if (data.isEmpty) {
+      Logger.w('WebSocket received empty message');
+      return;
+    }
+
+    Map<String, dynamic> json;
     try {
-      final json = jsonDecode(data as String) as Map<String, dynamic>;
-      final message = WSMessage.fromJson(json);
+      json = jsonDecode(data) as Map<String, dynamic>;
+    } catch (e) {
+      Logger.e('WebSocket JSON decode error: $e, data: ${data.substring(0, data.length.clamp(0, 100))}');
+      return;
+    }
+
+    WSMessage message;
+    try {
+      message = WSMessage.fromJson(json);
+    } catch (e) {
+      // Unknown message type - log but don't crash
+      Logger.w('WebSocket unknown message type: ${json['type']}, error: $e');
+      return;
+    }
+
+    try {
 
       debugPrint('WS received: ${message.type}');
 
@@ -700,18 +753,70 @@ class WebSocketSignalingService {
       }
 
       _messageController.add(message);
-    } catch (e) {
-      Logger.e('Error parsing WebSocket message', error: e);
+    } catch (e, stackTrace) {
+      Logger.e('Error processing WebSocket message: ${json['type']}', error: e);
+      debugPrint('Stack trace: $stackTrace');
+      // Send ping to verify connection is still healthy after error
+      if (isConnected) {
+        sendPing();
+      }
     }
+  }
+
+  /// Extract valid speaker name with multiple fallbacks and validation
+  String _extractValidSpeakerName(Map<String, dynamic> speaker, String speakerId) {
+    // Try displayName first
+    final displayName = speaker['displayName'];
+    if (displayName is String && displayName.trim().isNotEmpty) {
+      return displayName.trim();
+    }
+
+    // Try name field
+    final name = speaker['name'];
+    if (name is String && name.trim().isNotEmpty) {
+      return name.trim();
+    }
+
+    // Try email field - extract username part
+    final email = speaker['email'];
+    if (email is String && email.contains('@')) {
+      final username = email.split('@').first.trim();
+      if (username.isNotEmpty) {
+        return username;
+      }
+    }
+
+    // Fallback to user ID suffix (ensure non-empty)
+    if (speakerId.isNotEmpty) {
+      final idSuffix = speakerId.length >= 6 ? speakerId.substring(0, 6) : speakerId;
+      return 'User $idSuffix';
+    }
+
+    // Ultimate fallback
+    return 'Unknown User';
   }
 
   /// Handle floor-related messages
   void _handleFloorMessage(WSMessageType type, Map<String, dynamic> json) {
-    final roomId = json['roomId'] as String;
+    final roomId = json['roomId'] as String?;
+    if (roomId == null || roomId.isEmpty) {
+      Logger.e('WS: Floor message missing roomId');
+      return;
+    }
 
     switch (type) {
       case WSMessageType.floorGranted:
-        final expiresAt = DateTime.fromMillisecondsSinceEpoch(json['expiresAt'] as int);
+        // Safe null check for _userId
+        if (_userId == null) {
+          Logger.e('WS: floorGranted but _userId is null');
+          break;
+        }
+        final expiresAtMs = json['expiresAt'] as int?;
+        if (expiresAtMs == null) {
+          Logger.e('WS: floorGranted missing expiresAt');
+          break;
+        }
+        final expiresAt = DateTime.fromMillisecondsSinceEpoch(expiresAtMs);
         _floorStateController.add((
           roomId: roomId,
           state: WSFloorState(
@@ -734,16 +839,15 @@ class WebSocketSignalingService {
           debugPrint('WS: floorTaken - missing speakerId');
           break;
         }
-        // Handle empty or missing displayName - use a fallback
-        String speakerName = speaker['displayName'] as String? ?? '';
-        if (speakerName.isEmpty) {
-          // Try to get name from other fields or use a generated name
-          // Safe substring - handle IDs shorter than 6 chars
-          final idSuffix = speakerId.length >= 6 ? speakerId.substring(0, 6) : speakerId;
-          speakerName = speaker['name'] as String? ??
-                        speaker['email']?.toString().split('@').first ??
-                        'User $idSuffix';
+        // Safe parsing of timestamps with null checks
+        final joinedAtMs = speaker['joinedAt'] as int?;
+        final expiresAtMs = json['expiresAt'] as int?;
+        if (joinedAtMs == null || expiresAtMs == null) {
+          debugPrint('WS: floorTaken - missing timestamp data (joinedAt: $joinedAtMs, expiresAt: $expiresAtMs)');
+          break;
         }
+        // Robust speaker name extraction with validation
+        final speakerName = _extractValidSpeakerName(speaker, speakerId);
         debugPrint('WS: floorTaken - speakerId: $speakerId, speakerName: $speakerName');
         _floorStateController.add((
           roomId: roomId,
@@ -751,8 +855,8 @@ class WebSocketSignalingService {
             speakerId: speakerId,
             speakerName: speakerName,
             speakerPhotoUrl: speaker['photoUrl'] as String?,
-            startedAt: DateTime.fromMillisecondsSinceEpoch(speaker['joinedAt'] as int),
-            expiresAt: DateTime.fromMillisecondsSinceEpoch(json['expiresAt'] as int),
+            startedAt: DateTime.fromMillisecondsSinceEpoch(joinedAtMs),
+            expiresAt: DateTime.fromMillisecondsSinceEpoch(expiresAtMs),
           ),
         ));
         break;
@@ -823,23 +927,65 @@ class WebSocketSignalingService {
     _missedPongs = 0;
     _awaitingPong = false;
     _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
-      if (_channel != null && isConnected) {
-        // Check if we missed too many pongs (dead connection)
-        if (_awaitingPong) {
-          _missedPongs++;
-          debugPrint('WS: Missed pong ($_missedPongs/$_maxMissedPongs)');
-          if (_missedPongs >= _maxMissedPongs) {
-            debugPrint('WS: Connection appears dead, forcing reconnect');
-            _missedPongs = 0;
-            _awaitingPong = false;
-            _handleDone();
-            return;
-          }
-        }
-        _awaitingPong = true;
-        _send({'type': _messageTypeToString(WSMessageType.ping)});
-      }
+      sendPing();
     });
+  }
+
+  /// Send a ping to keep the connection alive (can be called externally for background keep-alive)
+  void sendPing() {
+    if (_channel != null && isConnected) {
+      // Check if we missed too many pongs (dead connection)
+      if (_awaitingPong) {
+        _missedPongs++;
+        debugPrint('WS: Missed pong ($_missedPongs/$_maxMissedPongs)');
+        if (_missedPongs >= _maxMissedPongs) {
+          debugPrint('WS: Connection appears dead, forcing reconnect');
+          _missedPongs = 0;
+          _awaitingPong = false;
+          _handleDone();
+          return;
+        }
+      }
+      _awaitingPong = true;
+      _send({'type': _messageTypeToString(WSMessageType.ping)});
+      debugPrint('WS: Ping sent');
+    } else if (_authToken != null && _connectionState == WSConnectionState.disconnected) {
+      // If disconnected but we have auth token, try to reconnect
+      debugPrint('WS: Not connected, attempting reconnect from background ping');
+      _scheduleReconnect();
+    }
+  }
+
+  /// Force reconnect - used when app comes to foreground
+  Future<void> forceReconnect() async {
+    debugPrint('WS: Force reconnect requested');
+
+    // Cancel any pending reconnect timer
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+
+    // Reset reconnect attempts to allow fresh start
+    _reconnectAttempts = 0;
+
+    // Disconnect current connection if any
+    _stopHeartbeat();
+    await _subscription?.cancel();
+    _subscription = null;
+    try {
+      await _channel?.sink.close();
+    } catch (e) {
+      debugPrint('WS: Error closing channel: $e');
+    }
+    _channel = null;
+    _isConnecting = false;
+
+    // Update state
+    _updateState(WSConnectionState.disconnected);
+
+    // Reconnect if we have credentials
+    if (_authToken != null) {
+      await connect(_authToken!, displayName: _displayName);
+    }
   }
 
   /// Stop heartbeat timer
@@ -870,15 +1016,15 @@ class WebSocketSignalingService {
   }
 
   /// Clean up resources
-  void dispose() {
-    disconnect();
-    _connectionStateController.close();
-    _messageController.close();
-    _floorStateController.close();
-    _floorDeniedController.close();
-    _roomMembersController.close();
-    _webrtcOfferController.close();
-    _webrtcAnswerController.close();
-    _webrtcIceController.close();
+  Future<void> dispose() async {
+    await disconnect();
+    await _connectionStateController.close();
+    await _messageController.close();
+    await _floorStateController.close();
+    await _floorDeniedController.close();
+    await _roomMembersController.close();
+    await _webrtcOfferController.close();
+    await _webrtcAnswerController.close();
+    await _webrtcIceController.close();
   }
 }

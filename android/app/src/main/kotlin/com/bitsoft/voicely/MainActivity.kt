@@ -1,9 +1,13 @@
 package com.bitsoft.voicely
 
 import android.content.Context
+import android.content.Intent
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -34,6 +38,13 @@ class MainActivity : FlutterActivity() {
                 }
                 "resetAudioMode" -> {
                     resetAudioMode()
+                    result.success(true)
+                }
+                "isBatteryOptimizationDisabled" -> {
+                    result.success(isBatteryOptimizationDisabled())
+                }
+                "requestDisableBatteryOptimization" -> {
+                    requestDisableBatteryOptimization()
                     result.success(true)
                 }
                 else -> {
@@ -206,5 +217,37 @@ class MainActivity : FlutterActivity() {
         audioManager.isSpeakerphoneOn = false
 
         android.util.Log.d("VoicelyAudio", "Reset audio mode to normal")
+    }
+
+    private fun isBatteryOptimizationDisabled(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            return powerManager.isIgnoringBatteryOptimizations(packageName)
+        }
+        return true // Pre-M devices don't have battery optimization
+    }
+
+    private fun requestDisableBatteryOptimization() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                    android.util.Log.d("VoicelyAudio", "Requested battery optimization exemption")
+                } catch (e: Exception) {
+                    android.util.Log.e("VoicelyAudio", "Failed to request battery optimization exemption", e)
+                    // Fallback: open battery optimization settings
+                    try {
+                        val fallbackIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                        startActivity(fallbackIntent)
+                    } catch (e2: Exception) {
+                        android.util.Log.e("VoicelyAudio", "Failed to open battery settings", e2)
+                    }
+                }
+            }
+        }
     }
 }

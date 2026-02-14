@@ -113,8 +113,28 @@ class AuthRepository {
     required String displayName,
     List<String> channelIds = const [],
   }) async {
+    // Validate inputs
+    final trimmedPhone = phoneNumber.trim();
+    final trimmedName = displayName.trim();
+
+    if (trimmedPhone.isEmpty) {
+      throw ArgumentError('Phone number cannot be empty');
+    }
+    if (trimmedPhone.length < 7 || trimmedPhone.length > 20) {
+      throw ArgumentError('Phone number must be between 7-20 characters');
+    }
+    if (password.length < 6) {
+      throw ArgumentError('Password must be at least 6 characters');
+    }
+    if (trimmedName.isEmpty) {
+      throw ArgumentError('Display name cannot be empty');
+    }
+    if (trimmedName.length > 100) {
+      throw ArgumentError('Display name must be under 100 characters');
+    }
+
     try {
-      final email = _phoneToEmail(phoneNumber);
+      final email = _phoneToEmail(trimmedPhone);
 
       // Use secondary auth to create user without signing out admin
       final secondaryAuth = await _getSecondaryAuth();
@@ -125,13 +145,13 @@ class AuthRepository {
       final user = credential.user;
       if (user == null) throw Exception('Sign up failed');
 
-      await user.updateDisplayName(displayName);
+      await user.updateDisplayName(trimmedName);
 
       // Create user model
       final userModel = UserModel(
         id: user.uid,
-        phoneNumber: phoneNumber,
-        displayName: displayName,
+        phoneNumber: trimmedPhone,
+        displayName: trimmedName,
         email: email,
         status: UserStatus.offline,
         createdAt: DateTime.now(),
@@ -159,9 +179,28 @@ class AuthRepository {
 
   /// Add a user to multiple channels
   Future<void> _addUserToChannels(String userId, List<String> channelIds) async {
+    if (channelIds.isEmpty) return;
+
+    // Validate all channels exist first
+    final validChannelIds = <String>[];
+    for (final channelId in channelIds) {
+      if (channelId.trim().isEmpty) continue;
+      final channelDoc = await _channelsRef.doc(channelId).get();
+      if (channelDoc.exists) {
+        validChannelIds.add(channelId);
+      } else {
+        Logger.w('Channel $channelId does not exist, skipping');
+      }
+    }
+
+    if (validChannelIds.isEmpty) {
+      Logger.w('No valid channels to add user to');
+      return;
+    }
+
     final batch = _firestore.batch();
 
-    for (final channelId in channelIds) {
+    for (final channelId in validChannelIds) {
       final channelRef = _channelsRef.doc(channelId);
 
       // Update channel's memberIds array and count

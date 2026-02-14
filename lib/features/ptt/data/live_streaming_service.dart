@@ -9,24 +9,38 @@ import '../../../core/services/native_audio_service.dart';
 import '../../../core/utils/logger.dart';
 import 'websocket_signaling_service.dart';
 
-/// Simple async lock to prevent concurrent operations
+/// Queue-based async lock to prevent concurrent operations (no busy-wait)
+/// Uses lock-passing pattern to ensure no gap between release and acquisition
 class _AsyncLock {
-  Completer<void>? _completer;
+  final _waitQueue = <Completer<void>>[];
+  bool _locked = false;
 
   Future<T> synchronized<T>(Future<T> Function() fn) async {
-    // Wait for any existing operation to complete
-    while (_completer != null) {
-      await _completer!.future;
+    if (_locked) {
+      // Lock is held - add ourselves to the queue and wait
+      final waiter = Completer<void>();
+      _waitQueue.add(waiter);
+      await waiter.future;
+      // When we wake up, the lock has been passed directly to us
+      // (_locked is still true, no gap for race conditions)
+    } else {
+      // Lock is free - acquire it synchronously (no await between check and set)
+      _locked = true;
     }
 
-    // Start our operation
-    _completer = Completer<void>();
     try {
       return await fn();
     } finally {
-      final c = _completer;
-      _completer = null;
-      c?.complete();
+      // Release the lock
+      if (_waitQueue.isNotEmpty) {
+        // Pass lock directly to next waiter (keep _locked = true)
+        // This ensures no gap where a new caller could slip in
+        final next = _waitQueue.removeAt(0);
+        next.complete();
+      } else {
+        // No waiters - actually release the lock
+        _locked = false;
+      }
     }
   }
 }
@@ -64,6 +78,7 @@ class LiveStreamingService {
 
   // Track if audio is already configured to avoid redundant setup
   bool _audioConfigured = false;
+  Completer<void>? _audioConfigCompleter; // Proper async signaling for config
 
   // WebRTC state
   MediaStream? _localStream;
@@ -71,6 +86,10 @@ class LiveStreamingService {
   final Map<String, MediaStream> _remoteStreams = {};
   final Map<String, RTCVideoRenderer> _audioRenderers = {};
   final Map<String, List<RTCIceCandidate>> _pendingIceCandidates = {};
+
+  // ICE candidate failure tracking
+  final Map<String, int> _iceCandidateFailures = {};
+  static const int _maxIceCandidateFailures = 5;
 
   // Stream subscriptions
   StreamSubscription? _offerSubscription;
@@ -81,6 +100,7 @@ class LiveStreamingService {
   StreamSubscription? _connectionSubscription;
   StreamSubscription? _memberJoinedSubscription;
   Timer? _floorRequestTimeout;
+  Timer? _errorRecoveryTimer;
 
   // State
   LiveStreamingState _state = LiveStreamingState.idle;
@@ -95,8 +115,12 @@ class LiveStreamingService {
   // Track actually connected listeners (ICE connected)
   final Set<String> _connectedListeners = {};
 
-  // Track pending delayed futures for cancellation
-  final List<Timer> _pendingTimers = [];
+  // Track ICE disconnect timers by peer ID for proper cancellation
+  final Map<String, Timer> _iceDisconnectTimers = {};
+
+  // Debounce timer for listener count updates
+  Timer? _listenerCountDebounceTimer;
+  static const Duration _listenerCountDebounceDelay = Duration(milliseconds: 150);
 
   // Controllers
   final _stateController = StreamController<LiveStreamingState>.broadcast();
@@ -319,7 +343,10 @@ class LiveStreamingService {
       if (_state == LiveStreamingState.connecting && !_isBroadcasting) {
         debugPrint('LiveStream: Floor request timed out');
         _updateState(LiveStreamingState.error);
-        Future.delayed(const Duration(seconds: 2), () {
+        // Use a tracked timer for error->idle transition
+        _errorRecoveryTimer?.cancel();
+        _errorRecoveryTimer = Timer(const Duration(seconds: 2), () {
+          _errorRecoveryTimer = null;
           if (_state == LiveStreamingState.error) {
             _updateState(LiveStreamingState.idle);
           }
@@ -334,6 +361,17 @@ class LiveStreamingService {
 
   /// Stop broadcasting (when PTT released)
   Future<void> stopBroadcasting() async {
+    // Cancel any pending floor request first
+    _floorRequestTimeout?.cancel();
+    _floorRequestTimeout = null;
+
+    // Handle case where we're still connecting (floor request pending)
+    if (_state == LiveStreamingState.connecting && !_isBroadcasting) {
+      debugPrint('LiveStream: Cancelling floor request');
+      _updateState(LiveStreamingState.idle);
+      return;
+    }
+
     if (!_isBroadcasting) return;
 
     Logger.d('Stopping broadcast');
@@ -353,10 +391,15 @@ class LiveStreamingService {
 
     // Reset audio configured flag so next session sets it up fresh
     _audioConfigured = false;
+    _audioConfigCompleter = null;
   }
 
   /// Handle floor state changes
   void _handleFloorStateChange(WSFloorState? floor) {
+    // Always cancel floor request timeout when floor state changes
+    _floorRequestTimeout?.cancel();
+    _floorRequestTimeout = null;
+
     if (floor == null) {
       // Floor released
       debugPrint('LiveStream: Floor released, current state: $_state');
@@ -374,12 +417,14 @@ class LiveStreamingService {
         // Close peer connections immediately to avoid stale connections
         _closeAllPeerConnections();
         _audioConfigured = false;
+        _audioConfigCompleter = null;
       } else {
         // Someone else stopped speaking - close connections immediately
         debugPrint('LiveStream: Floor released by speaker, returning to idle');
         _closeAllPeerConnections();
         _updateState(LiveStreamingState.idle);
         _audioConfigured = false;
+        _audioConfigCompleter = null;
       }
       return;
     }
@@ -389,16 +434,14 @@ class LiveStreamingService {
 
     // Check if we got the floor
     if (floor.speakerId == _wsService.userId) {
-      // We got the floor - cancel timeout and start streaming
-      _floorRequestTimeout?.cancel();
-      _floorRequestTimeout = null;
+      // We got the floor - start streaming (timeout already cancelled at method start)
       debugPrint('LiveStream: We got the floor, starting to broadcast');
       _isBroadcasting = true;
       _updateState(LiveStreamingState.broadcasting);
       _setLocalAudioEnabled(true);
       _startStreamingToListeners();
     } else {
-      // Someone else is speaking - prepare to receive
+      // Someone else is speaking - prepare to receive (timeout already cancelled at method start)
       debugPrint('LiveStream: Someone else is speaking: ${floor.speakerName}');
 
       // If we were broadcasting, stop and clean up immediately
@@ -406,6 +449,7 @@ class LiveStreamingService {
         debugPrint('LiveStream: We were broadcasting, cleaning up');
         _closeAllPeerConnections();
         _audioConfigured = false;
+        _audioConfigCompleter = null;
       }
 
       // Reset debug state for new listening session
@@ -425,7 +469,9 @@ class LiveStreamingService {
     if (_state == LiveStreamingState.connecting) {
       _updateState(LiveStreamingState.error);
       // Return to idle after a short delay so UI can show the error
-      Future.delayed(const Duration(seconds: 2), () {
+      _errorRecoveryTimer?.cancel();
+      _errorRecoveryTimer = Timer(const Duration(seconds: 2), () {
+        _errorRecoveryTimer = null;
         if (_state == LiveStreamingState.error) {
           _updateState(LiveStreamingState.idle);
         }
@@ -526,6 +572,8 @@ class LiveStreamingService {
 
       if (offer.sdp == null || offer.sdp!.isEmpty) {
         debugPrint('LiveStream: Failed to create offer for $listenerId - empty SDP');
+        // Clean up the peer connection we created
+        await _closePeerConnection(listenerId);
         return;
       }
 
@@ -549,6 +597,8 @@ class LiveStreamingService {
     } catch (e) {
       debugPrint('LiveStream: Error creating offer for $listenerId: $e');
       Logger.e('Error creating offer for $listenerId', error: e);
+      // Clean up peer connection on error
+      await _closePeerConnection(listenerId);
     }
   }
 
@@ -567,10 +617,49 @@ class LiveStreamingService {
       try {
         // CRITICAL: Configure audio for playback FIRST, before any WebRTC operations
         // This ensures audio routing is ready when tracks arrive
+        // Use Completer for proper async signaling (no busy-wait)
         if (!_audioConfigured) {
-          debugPrint('LiveStream: Pre-configuring audio for receiving');
-          await _configureAudioForReceiving();
-          _audioConfigured = true;
+          if (_audioConfigCompleter == null) {
+            // First caller - start configuration
+            _audioConfigCompleter = Completer<void>();
+            debugPrint('LiveStream: Pre-configuring audio for receiving');
+            try {
+              await _configureAudioForReceiving();
+              _audioConfigured = true;
+              _audioConfigCompleter!.complete();
+            } catch (e) {
+              _audioConfigCompleter!.completeError(e);
+              _audioConfigCompleter = null;
+              rethrow;
+            }
+          } else {
+            // Another caller is configuring - wait for completion
+            debugPrint('LiveStream: Audio configuration in progress, waiting...');
+            try {
+              await _audioConfigCompleter!.future.timeout(
+                const Duration(seconds: 5),
+                onTimeout: () {
+                  debugPrint('LiveStream: Audio config wait timed out, proceeding anyway');
+                  // Don't throw - just proceed with potentially unconfigured audio
+                  // This is better than hanging forever
+                },
+              );
+            } catch (e) {
+              debugPrint('LiveStream: Audio config wait error: $e');
+              // Continue anyway - audio might still work
+            }
+            // After timeout or error, check if audio was eventually configured
+            if (!_audioConfigured) {
+              debugPrint('LiveStream: Audio not configured after wait, attempting direct config');
+              try {
+                await _configureAudioForReceiving();
+                _audioConfigured = true;
+              } catch (e) {
+                debugPrint('LiveStream: Direct audio config also failed: $e');
+                // Continue anyway - WebRTC might still route audio
+              }
+            }
+          }
         }
 
         // Close any existing PC for this user first to avoid ICE conflicts
@@ -680,6 +769,8 @@ class LiveStreamingService {
       } catch (e) {
         debugPrint('LiveStream: Failed to handle answer from $fromUserId: $e');
         Logger.e('Failed to handle answer from $fromUserId', error: e);
+        // Clean up peer connection on SDP error - connection is likely unusable
+        await _closePeerConnection(fromUserId);
       }
     });
   }
@@ -721,9 +812,17 @@ class LiveStreamingService {
       try {
         await pc.addCandidate(iceCandidate);
         debugPrint('LiveStream: Added ICE candidate from $fromUserId successfully');
+        // Reset failure count on success
+        _iceCandidateFailures[fromUserId] = 0;
       } catch (e) {
         debugPrint('LiveStream: Failed to add ICE candidate from $fromUserId: $e');
-        // Don't log as error - ICE candidates can fail for valid reasons (e.g., connection closed)
+        // Track failures - too many may indicate a broken connection
+        final failures = (_iceCandidateFailures[fromUserId] ?? 0) + 1;
+        _iceCandidateFailures[fromUserId] = failures;
+        if (failures >= _maxIceCandidateFailures) {
+          debugPrint('LiveStream: Too many ICE candidate failures ($failures) for $fromUserId, closing connection');
+          await _closePeerConnection(fromUserId);
+        }
       }
     });
   }
@@ -736,16 +835,32 @@ class LiveStreamingService {
     final pc = _peerConnections[peerId];
     if (pc == null) return;
 
+    int successCount = 0;
+    int failureCount = 0;
+
     for (final candidate in pending) {
       try {
         await pc.addCandidate(candidate);
+        successCount++;
       } catch (e) {
+        failureCount++;
         Logger.e('Failed to apply pending ICE candidate', error: e);
       }
     }
 
     _pendingIceCandidates[peerId]!.clear();
-    Logger.d('Applied ${pending.length} pending ICE candidates for $peerId');
+
+    // Track cumulative failures
+    final totalFailures = (_iceCandidateFailures[peerId] ?? 0) + failureCount;
+    _iceCandidateFailures[peerId] = totalFailures;
+
+    Logger.d('Applied $successCount/${pending.length} pending ICE candidates for $peerId');
+
+    // Close connection if too many failures
+    if (totalFailures >= _maxIceCandidateFailures) {
+      debugPrint('LiveStream: Too many ICE candidate failures ($totalFailures) for $peerId, closing connection');
+      await _closePeerConnection(peerId);
+    }
   }
 
   /// Track ICE restart attempts per peer
@@ -757,8 +872,8 @@ class LiveStreamingService {
     final configuration = {
       'iceServers': AppConstants.iceServers,
       'sdpSemantics': 'unified-plan',
-      'iceCandidatePoolSize': 10,
-      'iceTransportPolicy': 'all', // Allow both direct and relay connections
+      'iceCandidatePoolSize': 2, // Reduce pool size - fewer pre-gathered candidates for faster start
+      'iceTransportPolicy': 'relay', // TURN only - faster than probing all candidates when TURN is reliable
       'bundlePolicy': 'max-bundle', // Bundle all media for efficiency
       'rtcpMuxPolicy': 'require', // Require RTCP multiplexing
     };
@@ -888,9 +1003,21 @@ class LiveStreamingService {
         _connectedListeners.remove(peerId);
         _emitListenerCount();
 
+        // Cancel any existing disconnect timer for this peer
+        _iceDisconnectTimers[peerId]?.cancel();
+
         // Don't close immediately - ICE may recover
-        // Use a tracked timer so we can cancel on dispose
-        final timer = Timer(const Duration(seconds: 5), () {
+        // Use a tracked timer so we can cancel when peer reconnects or is closed
+        _iceDisconnectTimers[peerId] = Timer(const Duration(seconds: 5), () {
+          // Remove from timer map first
+          final removedTimer = _iceDisconnectTimers.remove(peerId);
+
+          // Safety check: if timer was already removed (cancelled elsewhere), skip
+          if (removedTimer == null) {
+            debugPrint('LiveStream: ICE disconnect timer for $peerId already cancelled, skipping');
+            return;
+          }
+
           final currentPc = _peerConnections[peerId];
           if (currentPc != null) {
             final currentState = currentPc.iceConnectionState;
@@ -898,10 +1025,13 @@ class LiveStreamingService {
                 currentState == RTCIceConnectionState.RTCIceConnectionStateFailed) {
               debugPrint('LiveStream: ICE did not recover for $peerId, closing connection');
               _closePeerConnection(peerId);
+            } else {
+              debugPrint('LiveStream: ICE recovered for $peerId, state: $currentState');
             }
+          } else {
+            debugPrint('LiveStream: Peer $peerId already closed before timer fired');
           }
         });
-        _pendingTimers.add(timer);
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateClosed) {
         debugPrint('LiveStream: ICE CLOSED with $peerId - connection ended normally');
 
@@ -1086,16 +1216,29 @@ class LiveStreamingService {
     }
   }
 
-  /// Emit the current listener count to the stream
+  /// Emit the current listener count to the stream (debounced to prevent rapid updates)
   void _emitListenerCount() {
-    if (_isBroadcasting) {
-      _listenerCountController.add(_connectedListeners.length);
-      debugPrint('LiveStream: Connected listener count: ${_connectedListeners.length}');
-    }
+    if (!_isBroadcasting) return;
+
+    // Cancel pending debounce timer
+    _listenerCountDebounceTimer?.cancel();
+
+    // Debounce to prevent rapid updates during ICE state transitions
+    _listenerCountDebounceTimer = Timer(_listenerCountDebounceDelay, () {
+      _listenerCountDebounceTimer = null;
+      if (_isBroadcasting) {
+        _listenerCountController.add(_connectedListeners.length);
+        debugPrint('LiveStream: Connected listener count: ${_connectedListeners.length}');
+      }
+    });
   }
 
   /// Close a specific peer connection
   Future<void> _closePeerConnection(String peerId) async {
+    // Cancel any pending ICE disconnect timer for this peer
+    _iceDisconnectTimers[peerId]?.cancel();
+    _iceDisconnectTimers.remove(peerId);
+
     // IMPORTANT: Send any pending ICE candidates before closing
     // This ensures ICE candidates aren't lost if user releases quickly
     _peerIceBatchTimers[peerId]?.cancel();
@@ -1130,6 +1273,7 @@ class LiveStreamingService {
     _peerIceCandidates.remove(peerId);
     _pendingOffersSent.remove(peerId);
     _iceRestartAttempts.remove(peerId);
+    _iceCandidateFailures.remove(peerId);
   }
 
   /// Close all peer connections
@@ -1146,6 +1290,7 @@ class LiveStreamingService {
     _peerIceCandidates.clear();
     _pendingOffersSent.clear();
     _iceRestartAttempts.clear();
+    _iceCandidateFailures.clear();
     _connectedListeners.clear();
 
     // Emit zero listeners
@@ -1195,20 +1340,37 @@ class LiveStreamingService {
   Future<void> dispose() async {
     Logger.d('Disposing LiveStreamingService');
 
+    // Cancel timers (synchronous)
     _floorRequestTimeout?.cancel();
-    _offerSubscription?.cancel();
-    _answerSubscription?.cancel();
-    _iceSubscription?.cancel();
-    _floorSubscription?.cancel();
-    _floorDeniedSubscription?.cancel();
-    _connectionSubscription?.cancel();
-    _memberJoinedSubscription?.cancel();
+    _floorRequestTimeout = null;
+    _errorRecoveryTimer?.cancel();
+    _errorRecoveryTimer = null;
 
-    // Cancel all pending delayed timers (ICE disconnection checks, etc.)
-    for (final timer in _pendingTimers) {
+    // Await subscription cancellations to ensure proper cleanup
+    await _offerSubscription?.cancel();
+    _offerSubscription = null;
+    await _answerSubscription?.cancel();
+    _answerSubscription = null;
+    await _iceSubscription?.cancel();
+    _iceSubscription = null;
+    await _floorSubscription?.cancel();
+    _floorSubscription = null;
+    await _floorDeniedSubscription?.cancel();
+    _floorDeniedSubscription = null;
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = null;
+    await _memberJoinedSubscription?.cancel();
+    _memberJoinedSubscription = null;
+
+    // Cancel all ICE disconnect timers
+    for (final timer in _iceDisconnectTimers.values) {
       timer.cancel();
     }
-    _pendingTimers.clear();
+    _iceDisconnectTimers.clear();
+
+    // Cancel listener count debounce timer
+    _listenerCountDebounceTimer?.cancel();
+    _listenerCountDebounceTimer = null;
 
     // Clean up per-peer ICE timers
     for (final timer in _peerIceBatchTimers.values) {
@@ -1218,6 +1380,7 @@ class LiveStreamingService {
     _peerIceCandidates.clear();
     _pendingOffersSent.clear();
     _iceRestartAttempts.clear();
+    _iceCandidateFailures.clear();
     _connectedListeners.clear();
 
     await _closeAllPeerConnections();
@@ -1240,7 +1403,10 @@ class LiveStreamingService {
     // Reset audio mode to normal so it doesn't affect other apps
     try {
       await NativeAudioService.resetAudioMode();
-    } catch (_) {}
+    } catch (e) {
+      // Log but don't fail dispose - audio mode reset is not critical
+      debugPrint('LiveStream: Error resetting audio mode during dispose: $e');
+    }
 
     await _stateController.close();
     await _remoteStreamController.close();

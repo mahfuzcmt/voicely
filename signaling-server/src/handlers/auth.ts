@@ -124,19 +124,19 @@ export async function handleAuth(
 
   if (result.success) {
     // Store user info on WebSocket
-    // Use token-verified display name, but fall back to client-supplied name
-    // for cases where the token doesn't contain one (e.g. phone auth)
+    // Prioritize client-supplied displayName if provided and non-empty,
+    // as the client knows the user's full profile from Firebase Auth
     ws.userId = result.userId;
-    ws.displayName = result.displayName && result.displayName !== 'User'
-      ? result.displayName
-      : (clientDisplayName || result.displayName);
+    ws.displayName = (clientDisplayName && clientDisplayName.trim().length > 0)
+      ? clientDisplayName.trim()
+      : (result.displayName || 'User');
     ws.photoUrl = result.photoUrl;
     ws.rooms = new Set();
 
     const successMessage: AuthSuccessMessage = {
       type: MessageType.AUTH_SUCCESS,
       userId: result.userId!,
-      displayName: result.displayName!,
+      displayName: ws.displayName!, // Use the resolved displayName
       timestamp: Date.now(),
     };
 

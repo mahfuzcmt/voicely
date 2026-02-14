@@ -64,4 +64,27 @@ class NativeAudioService {
       return false;
     }
   }
+
+  /// Check if battery optimization is disabled for the app
+  static Future<bool> isBatteryOptimizationDisabled() async {
+    try {
+      final result = await _channel.invokeMethod('isBatteryOptimizationDisabled');
+      debugPrint('NativeAudio: isBatteryOptimizationDisabled = $result');
+      return result == true;
+    } catch (e) {
+      debugPrint('NativeAudio: Error checking battery optimization: $e');
+      return true; // Assume disabled on error (e.g., iOS)
+    }
+  }
+
+  /// Request the user to disable battery optimization for the app
+  /// This is critical for keeping the WebSocket connection alive in background
+  static Future<void> requestDisableBatteryOptimization() async {
+    try {
+      await _channel.invokeMethod('requestDisableBatteryOptimization');
+      debugPrint('NativeAudio: Requested battery optimization exemption');
+    } catch (e) {
+      debugPrint('NativeAudio: Error requesting battery exemption: $e');
+    }
+  }
 }
