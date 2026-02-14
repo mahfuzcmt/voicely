@@ -18,7 +18,7 @@ import { AuthenticatedWebSocket, MessageType, ErrorMessage } from './types';
 
 // Configuration
 const PORT = parseInt(process.env.PORT || '8080', 10);
-const HEARTBEAT_INTERVAL = parseInt(process.env.WS_HEARTBEAT_INTERVAL || '15000', 10); // Reduced from 30s for faster dead connection detection
+const HEARTBEAT_INTERVAL = parseInt(process.env.WS_HEARTBEAT_INTERVAL || '30000', 10); // 30 seconds - more tolerant of network latency
 const CONNECTION_TIMEOUT = parseInt(process.env.WS_CONNECTION_TIMEOUT || '30000', 10); // Reduced from 60s
 const MAX_CONNECTIONS_PER_ROOM = parseInt(process.env.MAX_CONNECTIONS_PER_ROOM || '50', 10);
 const MAX_TOTAL_CONNECTIONS = parseInt(process.env.MAX_TOTAL_CONNECTIONS || '500', 10);
@@ -97,14 +97,14 @@ const pingInterval = setInterval(() => {
       // Increment missed heartbeat counter
       missedHeartbeats.set(ws, missed + 1);
 
-      // Allow 2 missed heartbeats before terminating (handles brief network glitches)
-      if (missed >= 2) {
+      // Allow 3 missed heartbeats before terminating (handles network glitches - 2 minutes total)
+      if (missed >= 3) {
         console.log(`Terminating dead connection: ${authWs.userId} (missed ${missed + 1} heartbeats)`);
         handleDisconnect(roomManager, floorController, authWs);
         missedHeartbeats.delete(ws);
         return ws.terminate();
       } else {
-        console.log(`Warning: ${authWs.userId} missed heartbeat (${missed + 1}/3)`);
+        console.log(`Warning: ${authWs.userId} missed heartbeat (${missed + 1}/4)`);
       }
     } else {
       // Reset counter on successful pong

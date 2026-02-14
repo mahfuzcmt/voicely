@@ -372,17 +372,10 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
                       style: const TextStyle(
                         fontSize: 18,
                         fontWeight: FontWeight.bold,
+                        color: Colors.black87,
                       ),
                     ),
                   ],
-                ),
-              ),
-              // DEBUG: Show raw data
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Text(
-                  'DEBUG: ${onlineMembers.map((m) => m.displayName).join(", ")}',
-                  style: TextStyle(fontSize: 10, color: Colors.grey),
                 ),
               ),
               const Divider(height: 1),
@@ -438,6 +431,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
                           style: const TextStyle(
                             fontWeight: FontWeight.w500,
                             fontSize: 16,
+                            color: Colors.black87,
                           ),
                         ),
                         trailing: Container(

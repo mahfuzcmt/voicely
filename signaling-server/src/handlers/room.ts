@@ -55,6 +55,10 @@ export function handleJoinRoom(
     floorState,
     timestamp: Date.now(),
   };
+  // DEBUG: Log exact JSON being sent
+  const jsonStr = JSON.stringify(joinedMessage);
+  console.log(`ROOM_JOINED JSON being sent to ${userId}:`);
+  console.log(jsonStr);
   sendMessage(ws, joinedMessage);
 
   // Notify other room members about the new member

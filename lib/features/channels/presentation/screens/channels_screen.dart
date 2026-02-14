@@ -5,8 +5,10 @@ import 'package:go_router/go_router.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
 import '../../../../di/providers.dart';
+import '../../../../main.dart' show getPendingChannelId, notificationTapStream;
 import '../../domain/models/channel_model.dart';
 import '../widgets/channel_tile.dart';
+import 'dart:async';
 
 class ChannelsScreen extends ConsumerStatefulWidget {
   const ChannelsScreen({super.key});
@@ -17,14 +19,66 @@ class ChannelsScreen extends ConsumerStatefulWidget {
 
 class _ChannelsScreenState extends ConsumerState<ChannelsScreen> {
   bool _hasAutoNavigated = false;
+  bool _hasCheckedPendingChannel = false;
+  StreamSubscription<String>? _notificationTapSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    // Listen for notification taps while app is open
+    _notificationTapSubscription = notificationTapStream.listen((channelId) {
+      debugPrint('ChannelsScreen: Notification tap received for channel: $channelId');
+      if (mounted && channelId.isNotEmpty) {
+        // Navigate to the channel
+        context.goNamed(
+          'channelDetail',
+          pathParameters: {'channelId': channelId},
+        );
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _notificationTapSubscription?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final channelsAsync = ref.watch(userChannelsProvider);
     final userAsync = ref.watch(currentUserStreamProvider);
 
-    // Auto-navigate to channel if there's only one
+    // Check for pending channel from notification tap FIRST
+    // This takes priority over single-channel auto-navigation
     channelsAsync.whenData((channels) {
+      if (!_hasCheckedPendingChannel) {
+        _hasCheckedPendingChannel = true;
+        final pendingChannelId = getPendingChannelId();
+
+        if (pendingChannelId != null && pendingChannelId.isNotEmpty) {
+          // Check if user has access to this channel
+          final hasAccess = channels.any((c) => c.id == pendingChannelId);
+
+          if (hasAccess) {
+            debugPrint('ChannelsScreen: Auto-navigating to pending channel: $pendingChannelId');
+            _hasAutoNavigated = true;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) {
+                context.goNamed(
+                  'channelDetail',
+                  pathParameters: {'channelId': pendingChannelId},
+                );
+              }
+            });
+            return; // Skip single-channel auto-nav
+          } else {
+            debugPrint('ChannelsScreen: User has no access to pending channel: $pendingChannelId');
+          }
+        }
+      }
+
+      // Auto-navigate to channel if there's only one (and no pending channel)
       if (channels.length == 1 && !_hasAutoNavigated) {
         _hasAutoNavigated = true;
         // Use addPostFrameCallback to navigate after build completes
