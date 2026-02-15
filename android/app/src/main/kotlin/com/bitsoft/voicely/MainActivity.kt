@@ -3,7 +3,10 @@ package com.bitsoft.voicely
 import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
+import android.media.AudioRecord
 import android.media.ToneGenerator
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
@@ -14,6 +17,10 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.bitsoft.voicely/audio"
+
+    // Hardware noise suppressor (zero latency)
+    private var noiseSuppressor: NoiseSuppressor? = null
+    private var echoCanceler: AcousticEchoCanceler? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -46,6 +53,17 @@ class MainActivity : FlutterActivity() {
                 "requestDisableBatteryOptimization" -> {
                     requestDisableBatteryOptimization()
                     result.success(true)
+                }
+                "enableNoiseSuppression" -> {
+                    val audioSessionId = call.argument<Int>("audioSessionId") ?: 0
+                    result.success(enableNoiseSuppression(audioSessionId))
+                }
+                "disableNoiseSuppression" -> {
+                    disableNoiseSuppression()
+                    result.success(true)
+                }
+                "isNoiseSuppressionAvailable" -> {
+                    result.success(isNoiseSuppressionAvailable())
                 }
                 else -> {
                     result.notImplemented()
@@ -248,6 +266,75 @@ class MainActivity : FlutterActivity() {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Check if hardware noise suppression is available on this device
+     */
+    private fun isNoiseSuppressionAvailable(): Map<String, Any> {
+        return mapOf(
+            "noiseSuppressor" to NoiseSuppressor.isAvailable(),
+            "echoCanceler" to AcousticEchoCanceler.isAvailable()
+        )
+    }
+
+    /**
+     * Enable hardware-accelerated noise suppression (zero latency)
+     * Call this when starting audio capture with the audio session ID
+     */
+    private fun enableNoiseSuppression(audioSessionId: Int): Map<String, Any> {
+        var nsEnabled = false
+        var aecEnabled = false
+
+        try {
+            // Enable NoiseSuppressor if available
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor?.release()
+                noiseSuppressor = NoiseSuppressor.create(audioSessionId)
+                noiseSuppressor?.enabled = true
+                nsEnabled = noiseSuppressor?.enabled == true
+                android.util.Log.d("VoicelyAudio", "NoiseSuppressor enabled: $nsEnabled for session $audioSessionId")
+            } else {
+                android.util.Log.w("VoicelyAudio", "NoiseSuppressor not available on this device")
+            }
+
+            // Enable AcousticEchoCanceler if available
+            if (AcousticEchoCanceler.isAvailable()) {
+                echoCanceler?.release()
+                echoCanceler = AcousticEchoCanceler.create(audioSessionId)
+                echoCanceler?.enabled = true
+                aecEnabled = echoCanceler?.enabled == true
+                android.util.Log.d("VoicelyAudio", "AcousticEchoCanceler enabled: $aecEnabled for session $audioSessionId")
+            } else {
+                android.util.Log.w("VoicelyAudio", "AcousticEchoCanceler not available on this device")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyAudio", "Failed to enable noise suppression", e)
+        }
+
+        return mapOf(
+            "noiseSuppressorEnabled" to nsEnabled,
+            "echoCancelerEnabled" to aecEnabled
+        )
+    }
+
+    /**
+     * Disable and release noise suppression resources
+     */
+    private fun disableNoiseSuppression() {
+        try {
+            noiseSuppressor?.enabled = false
+            noiseSuppressor?.release()
+            noiseSuppressor = null
+
+            echoCanceler?.enabled = false
+            echoCanceler?.release()
+            echoCanceler = null
+
+            android.util.Log.d("VoicelyAudio", "Noise suppression disabled and released")
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyAudio", "Error disabling noise suppression", e)
         }
     }
 }

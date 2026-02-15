@@ -18,10 +18,16 @@ class NativeAudioService {
   }
 
   /// Configure audio mode for voice chat (requests audio focus and sets mode)
+  /// Also enables hardware noise suppression for cleaner audio in noisy environments
   static Future<bool> setAudioModeForVoiceChat() async {
     try {
       final result = await _channel.invokeMethod('setAudioModeForVoiceChat');
       debugPrint('NativeAudio: setAudioModeForVoiceChat = $result');
+
+      // Enable hardware noise suppression (zero latency)
+      final nsResult = await enableNoiseSuppression();
+      debugPrint('NativeAudio: Hardware noise suppression: $nsResult');
+
       return result == true;
     } catch (e) {
       debugPrint('NativeAudio: Error setting audio mode: $e');
@@ -54,8 +60,12 @@ class NativeAudioService {
   }
 
   /// Reset audio mode to normal (releases audio focus and resets mode)
+  /// Also disables hardware noise suppression
   static Future<bool> resetAudioMode() async {
     try {
+      // Disable noise suppression first
+      await disableNoiseSuppression();
+
       final result = await _channel.invokeMethod('resetAudioMode');
       debugPrint('NativeAudio: resetAudioMode = $result');
       return result == true;
@@ -85,6 +95,46 @@ class NativeAudioService {
       debugPrint('NativeAudio: Requested battery optimization exemption');
     } catch (e) {
       debugPrint('NativeAudio: Error requesting battery exemption: $e');
+    }
+  }
+
+  /// Check if hardware noise suppression is available on this device
+  static Future<Map<String, bool>> isNoiseSuppressionAvailable() async {
+    try {
+      final result = await _channel.invokeMethod('isNoiseSuppressionAvailable');
+      debugPrint('NativeAudio: isNoiseSuppressionAvailable = $result');
+      return Map<String, bool>.from(result);
+    } catch (e) {
+      debugPrint('NativeAudio: Error checking noise suppression: $e');
+      return {'noiseSuppressor': false, 'echoCanceler': false};
+    }
+  }
+
+  /// Enable hardware-accelerated noise suppression (zero latency)
+  /// Pass audioSessionId 0 to attach to global audio session
+  static Future<Map<String, bool>> enableNoiseSuppression({int audioSessionId = 0}) async {
+    try {
+      final result = await _channel.invokeMethod(
+        'enableNoiseSuppression',
+        {'audioSessionId': audioSessionId},
+      );
+      debugPrint('NativeAudio: enableNoiseSuppression = $result');
+      return Map<String, bool>.from(result);
+    } catch (e) {
+      debugPrint('NativeAudio: Error enabling noise suppression: $e');
+      return {'noiseSuppressorEnabled': false, 'echoCancelerEnabled': false};
+    }
+  }
+
+  /// Disable hardware noise suppression
+  static Future<bool> disableNoiseSuppression() async {
+    try {
+      final result = await _channel.invokeMethod('disableNoiseSuppression');
+      debugPrint('NativeAudio: disableNoiseSuppression = $result');
+      return result == true;
+    } catch (e) {
+      debugPrint('NativeAudio: Error disabling noise suppression: $e');
+      return false;
     }
   }
 }

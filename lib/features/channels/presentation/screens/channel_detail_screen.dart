@@ -471,6 +471,12 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
         if (previous?.isBroadcasting != true && next.isBroadcasting == true) {
           _stopAllAudioPlayback();
         }
+        // When live broadcast ends (we were listening), update timestamp to prevent
+        // the recorded message from auto-playing (we already heard it live)
+        if (previous?.isListening == true && next.isListening != true) {
+          debugPrint('Live broadcast ended - updating timestamp to prevent auto-replay');
+          _lastAutoPlayedTimestamp = DateTime.now();
+        }
       },
     );
 
@@ -711,7 +717,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
                     // Show user-friendly status text
                     Text(
                       (session?.isConnected ?? false)
-                          ? 'Ready • Hold to talk'
+                          ? 'Ready'
                           : (session?.isConnecting ?? false)
                               ? 'Connecting...'
                               : 'Tap to reconnect',
@@ -869,7 +875,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
     return Center(
       child: PttButton(
         channelId: channel.id,
-        size: 320,
+        size: 380,
       ),
     );
   }
@@ -877,7 +883,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
   String _getLiveStatusText(LivePttSessionState session) {
     switch (session.state) {
       case LivePttState.idle:
-        return 'Hold to talk';
+        return 'Ready';
       case LivePttState.connecting:
         return 'Connecting...';
       case LivePttState.requestingFloor:

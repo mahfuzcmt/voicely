@@ -73,6 +73,11 @@ class WebRTCService {
           'noiseSuppression': true,
           'autoGainControl': true,
           'sampleRate': AppConstants.audioSampleRate,
+          // Enhanced noise suppression (Google's experimental options)
+          'googNoiseSuppression': true,
+          'googHighpassFilter': true,
+          'googTypingNoiseDetection': true,
+          'googAudioMirroring': false,
         },
         'video': false,
       };

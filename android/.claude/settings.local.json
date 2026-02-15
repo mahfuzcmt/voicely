@@ -1,7 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(flutter doctor:*)"
+      "Bash(flutter doctor:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(flutter run:*)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter run:*)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter clean:*)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter pub get:*)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter build:*)",
+      "Bash(./gradlew assembleDebug:*)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter devices:*)",
+      "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter emulators:*)",
+      "Bash(find:*)"
     ]
   }
 }
