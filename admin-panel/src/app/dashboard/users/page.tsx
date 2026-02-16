@@ -78,13 +78,16 @@ export default function UsersPage() {
         method: 'DELETE',
       });
 
-      if (!res.ok) throw new Error('Failed to delete');
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to delete user');
+      }
 
       toast.success('User deleted successfully');
       setDeleteDialog({ open: false, user: null });
       fetchUsers(filterChannel);
-    } catch (error) {
-      toast.error('Failed to delete user');
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to delete user');
     }
   };
 
@@ -101,13 +104,16 @@ export default function UsersPage() {
         body: JSON.stringify(data),
       });
 
-      if (!res.ok) throw new Error('Failed to save');
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to save user');
+      }
 
       toast.success(editingUser ? 'User updated' : 'User created');
       setModalOpen(false);
       fetchUsers(filterChannel);
-    } catch (error) {
-      toast.error('Failed to save user');
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to save user');
     }
   };
 
@@ -121,14 +127,17 @@ export default function UsersPage() {
         body: JSON.stringify({ channelIds }),
       });
 
-      if (!res.ok) throw new Error('Failed to assign channels');
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to assign channels');
+      }
 
       toast.success('Channels assigned successfully');
       setAssignModalOpen(false);
       fetchUsers(filterChannel);
       fetchChannels();
-    } catch (error) {
-      toast.error('Failed to assign channels');
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to assign channels');
     }
   };
 

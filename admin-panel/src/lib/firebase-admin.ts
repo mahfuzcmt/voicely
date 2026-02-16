@@ -13,12 +13,19 @@ function initializeFirebaseAdmin() {
 
     if (serviceAccountJson) {
       // Parse the service account JSON from environment variable
-      const serviceAccount = JSON.parse(serviceAccountJson);
+      let serviceAccount;
+      try {
+        serviceAccount = JSON.parse(serviceAccountJson);
+      } catch (e) {
+        console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:', e);
+        throw new Error('FIREBASE_SERVICE_ACCOUNT environment variable contains invalid JSON');
+      }
       app = initializeApp({
         credential: cert(serviceAccount),
         projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
       });
     } else {
+      console.warn('FIREBASE_SERVICE_ACCOUNT not set. Firebase Admin operations (user creation, deletion) will fail.');
       // Fallback for development - requires GOOGLE_APPLICATION_CREDENTIALS env var
       app = initializeApp({
         projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
