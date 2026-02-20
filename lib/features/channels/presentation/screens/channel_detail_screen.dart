@@ -1,15 +1,15 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:just_audio/just_audio.dart';
 import '../../../../core/constants/app_constants.dart';
-import '../../../../core/services/background_audio_service.dart';
+import '../../../../core/services/native_audio_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
 import '../../../../di/providers.dart';
 import '../../../../main.dart' show notificationTapStream;
-import '../../../auth/presentation/screens/profile_screen.dart';
 import '../../../messaging/data/message_repository.dart';
 import '../../../messaging/domain/models/message_model.dart';
 import '../../../ptt/presentation/providers/live_ptt_providers.dart';
@@ -41,25 +41,16 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
     with WidgetsBindingObserver {
   AudioPlayer? _audioPlayer;
   String? _currentlyPlayingId;
-  String? _lastAutoPlayedMessageId;
-  DateTime? _lastAutoPlayedTimestamp; // Track timestamp to handle message ordering
-  StreamSubscription? _messageSubscription;
   StreamSubscription? _playerStateSubscription;
   StreamSubscription<String>? _notificationTapSubscription;
-  final BackgroundAudioService _backgroundService = BackgroundAudioService();
   String? _channelName;
   bool _isPlayingArchivedMessage = false;
-  bool _autoPlayListenerSetup = false; // Guard against duplicate setup
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _audioPlayer = AudioPlayer();
-    _backgroundService.initialize();
-    // Initialize timestamp to NOW so only NEW messages arriving after this point are auto-played
-    _lastAutoPlayedTimestamp = DateTime.now();
-    _setupAutoPlayListener();
     _setupPlayerStateListener();
     _setupNotificationTapListener();
   }
@@ -83,8 +74,6 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _messageSubscription?.cancel();
-    _messageSubscription = null;
     _playerStateSubscription?.cancel();
     _playerStateSubscription = null;
     _notificationTapSubscription?.cancel();
@@ -97,12 +86,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      debugPrint('ChannelDetail: App resumed, refreshing messages');
-      // Invalidate the messages provider to force a fresh fetch
-      ref.invalidate(channelMessagesProvider(widget.channelId));
-      // Reset auto-play listener to pick up new messages
-      _autoPlayListenerSetup = false;
-      _setupAutoPlayListener();
+      debugPrint('ChannelDetail: App resumed');
     }
   }
 
@@ -114,79 +98,6 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
             _currentlyPlayingId = null;
             _isPlayingArchivedMessage = false;
           });
-        }
-      }
-    });
-  }
-
-  void _setupAutoPlayListener() {
-    // Always cancel any existing subscription first to prevent leaks
-    _messageSubscription?.cancel();
-    _messageSubscription = null;
-
-    // Guard against duplicate subscription within same lifecycle
-    if (_autoPlayListenerSetup) {
-      debugPrint('Auto-play listener already set up, skipping');
-      return;
-    }
-    _autoPlayListenerSetup = true;
-
-    final currentUser = ref.read(authStateProvider).value;
-    if (currentUser == null) return;
-
-    final messageRepo = ref.read(messageRepositoryProvider);
-    _messageSubscription = messageRepo.getChannelMessages(widget.channelId).listen((messages) {
-      if (messages.isEmpty) return;
-
-      // Find the actual latest message by timestamp (don't assume ordering)
-      MessageModel? latestMessage;
-      for (final msg in messages) {
-        final msgTimestamp = msg.timestamp;
-        if (msgTimestamp == null) continue;
-        final latestTimestamp = latestMessage?.timestamp;
-        if (latestMessage == null || latestTimestamp == null || msgTimestamp.isAfter(latestTimestamp)) {
-          latestMessage = msg;
-        }
-      }
-      if (latestMessage == null || latestMessage.timestamp == null) return;
-
-      // Skip if it's our own message or already auto-played (by ID or timestamp)
-      if (latestMessage.senderId == currentUser.uid ||
-          latestMessage.id == _lastAutoPlayedMessageId) {
-        return;
-      }
-
-      // Skip if this message is older than or equal to the last auto-played
-      if (_lastAutoPlayedTimestamp != null &&
-          !latestMessage.timestamp!.isAfter(_lastAutoPlayedTimestamp!)) {
-        return;
-      }
-
-      // Skip if currently in a live broadcast (listening or broadcasting)
-      final session = ref.read(livePttSessionProvider(widget.channelId));
-      if (session.isListening || session.isBroadcasting) {
-        debugPrint('Auto-play skipped: currently in live broadcast');
-        return;
-      }
-
-      // Check if auto-play is enabled
-      final autoPlayEnabled = ref.read(autoPlayEnabledProvider);
-      debugPrint('Auto-play check: enabled=$autoPlayEnabled, audioUrl=${latestMessage.audioUrl}, type=${latestMessage.type}');
-
-      if (autoPlayEnabled &&
-          latestMessage.audioUrl != null &&
-          latestMessage.type == MessageType.audio) {
-        debugPrint('Auto-playing message: ${latestMessage.id}');
-        _lastAutoPlayedMessageId = latestMessage.id;
-        _lastAutoPlayedTimestamp = latestMessage.timestamp;
-        // Use background service for auto-play (works when screen is locked)
-        _backgroundService.playAudio(
-          audioUrl: latestMessage.audioUrl!,
-          senderName: latestMessage.senderName,
-          channelName: _channelName ?? 'Channel',
-        );
-        if (mounted) {
-          setState(() => _currentlyPlayingId = latestMessage!.id);
         }
       }
     });
@@ -211,6 +122,13 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
         _isPlayingArchivedMessage = isArchived;
       });
 
+      // Set audio mode for loud speaker playback (Android only)
+      if (Platform.isAndroid) {
+        await NativeAudioService.setAudioModeForPlayback();
+        // Small delay to ensure audio mode change takes effect
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+
       await _audioPlayer?.stop();
       await _audioPlayer?.setUrl(message.audioUrl!);
       await _audioPlayer?.play();
@@ -226,19 +144,13 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
     }
   }
 
-  /// Stop ALL audio playback when live broadcast starts
-  /// This includes both the replay audio player and the background service auto-play
-  Future<void> _stopAllAudioPlayback() async {
-    debugPrint('Stopping all audio playback for incoming broadcast');
+  /// Stop audio playback when live broadcast starts
+  Future<void> _stopAudioPlayback() async {
+    debugPrint('Stopping audio playback for incoming broadcast');
 
     // Stop the replay audio player
     if (_audioPlayer?.playing == true) {
       await _audioPlayer?.stop();
-    }
-
-    // Stop the background service audio (auto-play)
-    if (_backgroundService.isPlaying) {
-      await _backgroundService.stop();
     }
 
     // Reset state
@@ -250,39 +162,26 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
     }
   }
 
-  /// Play the last recorded message
+  /// Play the last recorded message (on-demand fetch - saves Firestore reads)
   Future<void> _playLastMessage() async {
     final messageRepo = ref.read(messageRepositoryProvider);
 
     try {
-      // Get the last audio message from the channel
-      final messages = await messageRepo.getChannelMessages(widget.channelId).first;
-
-      if (messages.isEmpty) {
-        if (mounted) {
-          context.showSnackBar('No messages to replay');
-        }
-        return;
-      }
-
-      // Find the last audio message
-      final lastAudioMessage = messages.firstWhere(
-        (m) => m.type == MessageType.audio && m.audioUrl != null,
-        orElse: () => messages.first,
-      );
-
-      if (lastAudioMessage.audioUrl == null) {
-        if (mounted) {
-          context.showSnackBar('No audio messages to replay');
-        }
-        return;
-      }
-
       // Check if currently in a live broadcast - don't play if listening
       final session = ref.read(livePttSessionProvider(widget.channelId));
       if (session.isListening) {
         if (mounted) {
           context.showSnackBar('Cannot replay during live broadcast');
+        }
+        return;
+      }
+
+      // Get only the last audio message (efficient - 1 read only)
+      final lastAudioMessage = await messageRepo.getLastAudioMessage(widget.channelId);
+
+      if (lastAudioMessage == null || lastAudioMessage.audioUrl == null) {
+        if (mounted) {
+          context.showSnackBar('No audio messages to replay');
         }
         return;
       }
@@ -457,25 +356,18 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
   @override
   Widget build(BuildContext context) {
     final channelAsync = ref.watch(channelProvider(widget.channelId));
-    final autoPlayEnabled = ref.watch(autoPlayEnabledProvider);
 
-    // Listen for incoming broadcast to stop all audio playback
+    // Listen for incoming broadcast to stop audio playback
     ref.listen<LivePttSessionState>(
       livePttSessionProvider(widget.channelId),
       (previous, next) {
-        // When someone starts broadcasting (we start listening), stop all audio
+        // When someone starts broadcasting (we start listening), stop audio
         if (previous?.isListening != true && next.isListening == true) {
-          _stopAllAudioPlayback();
+          _stopAudioPlayback();
         }
         // Also stop when WE start broadcasting
         if (previous?.isBroadcasting != true && next.isBroadcasting == true) {
-          _stopAllAudioPlayback();
-        }
-        // When live broadcast ends (we were listening), update timestamp to prevent
-        // the recorded message from auto-playing (we already heard it live)
-        if (previous?.isListening == true && next.isListening != true) {
-          debugPrint('Live broadcast ended - updating timestamp to prevent auto-replay');
-          _lastAutoPlayedTimestamp = DateTime.now();
+          _stopAudioPlayback();
         }
       },
     );
@@ -532,8 +424,8 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
           body: SafeArea(
             child: Column(
               children: [
-                // Top bar with back, title, and archive button
-                _buildTopBar(channel, autoPlayEnabled),
+                // Top bar with back, title, and replay button
+                _buildTopBar(channel),
 
                 // User/Channel info section
                 _buildChannelInfo(channel),
@@ -553,7 +445,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
     );
   }
 
-  Widget _buildTopBar(ChannelModel channel, bool autoPlayEnabled) {
+  Widget _buildTopBar(ChannelModel channel) {
     final session = AppConstants.useLiveStreaming
         ? ref.watch(livePttSessionProvider(channel.id))
         : null;

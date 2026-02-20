@@ -175,6 +175,27 @@ class LiveStreamingService {
     _setupListeners();
   }
 
+  /// Pre-initialize local audio stream for faster PTT response
+  /// Call this when entering a room to have the stream ready
+  Future<bool> preInitializeLocalStream() async {
+    if (_localStream != null) return true;
+    debugPrint('LiveStream: Pre-initializing local stream for fast PTT');
+    return await initLocalStream();
+  }
+
+  /// Pre-configure audio for receiving before any offers arrive
+  /// Call this when entering a room as a listener
+  Future<void> preConfigureAudioForReceiving() async {
+    if (_audioConfigured) {
+      debugPrint('LiveStream: Audio already pre-configured');
+      return;
+    }
+    debugPrint('LiveStream: Pre-configuring audio for receiving');
+    await _configureAudioForReceiving();
+    _audioConfigured = true;
+    debugPrint('LiveStream: Audio pre-configured successfully');
+  }
+
   /// Setup WebSocket message listeners
   void _setupListeners() {
     // Listen for WebRTC offers (when someone starts speaking)
@@ -258,13 +279,33 @@ class LiveStreamingService {
     if (_localStream != null) return true;
 
     try {
+      // Check for Bluetooth microphone and start SCO if available
+      // This must be done BEFORE getUserMedia() to make Bluetooth mic available
+      final bluetoothStatus = await NativeAudioService.isBluetoothAudioConnected();
+      final isBluetoothConnected = bluetoothStatus['isConnected'] as bool? ?? false;
+
+      if (isBluetoothConnected) {
+        debugPrint('LiveStream: Bluetooth connected, starting SCO for microphone...');
+        final scoResult = await NativeAudioService.startBluetoothScoForMic();
+        final scoSuccess = scoResult['success'] as bool? ?? false;
+        if (scoSuccess) {
+          debugPrint('LiveStream: Bluetooth SCO started - using Bluetooth mic: ${scoResult['deviceName']}');
+          // Give SCO a moment to establish
+          await Future.delayed(const Duration(milliseconds: 200));
+        } else {
+          debugPrint('LiveStream: Bluetooth SCO failed, will use built-in mic: ${scoResult['reason']}');
+        }
+      }
+
       // Try with full audio constraints first
+      // Note: Don't specify sampleRate - let WebRTC use default 48000 Hz
+      // Specifying 16000 Hz causes playback speed issues
       final constraints = {
         'audio': {
           'echoCancellation': true,
           'noiseSuppression': true,
           'autoGainControl': true,
-          'sampleRate': AppConstants.audioSampleRate,
+          // sampleRate removed - WebRTC handles this automatically
         },
         'video': false,
       };
@@ -389,6 +430,14 @@ class LiveStreamingService {
     // when another user starts speaking or we start again quickly
     await _closeAllPeerConnections();
 
+    // Stop Bluetooth SCO if it was started for microphone
+    try {
+      await NativeAudioService.stopBluetoothSco();
+      debugPrint('LiveStream: Stopped Bluetooth SCO after broadcast');
+    } catch (e) {
+      debugPrint('LiveStream: Error stopping Bluetooth SCO: $e');
+    }
+
     // Reset audio configured flag so next session sets it up fresh
     _audioConfigured = false;
     _audioConfigCompleter = null;
@@ -416,6 +465,10 @@ class LiveStreamingService {
         _updateState(LiveStreamingState.idle);
         // Close peer connections immediately to avoid stale connections
         _closeAllPeerConnections();
+        // Stop Bluetooth SCO if it was started
+        NativeAudioService.stopBluetoothSco().catchError((e) {
+          debugPrint('LiveStream: Error stopping Bluetooth SCO: $e');
+        });
         _audioConfigured = false;
         _audioConfigCompleter = null;
       } else {
@@ -872,7 +925,7 @@ class LiveStreamingService {
     final configuration = {
       'iceServers': AppConstants.iceServers,
       'sdpSemantics': 'unified-plan',
-      'iceCandidatePoolSize': 2, // Reduce pool size - fewer pre-gathered candidates for faster start
+      'iceCandidatePoolSize': 0, // No pre-gathering needed with relay-only (faster start)
       'iceTransportPolicy': 'relay', // TURN only - faster than probing all candidates when TURN is reliable
       'bundlePolicy': 'max-bundle', // Bundle all media for efficiency
       'rtcpMuxPolicy': 'require', // Require RTCP multiplexing
@@ -1074,8 +1127,8 @@ class LiveStreamingService {
     // Cancel existing timer for this peer
     _peerIceBatchTimers[peerId]?.cancel();
 
-    // Schedule batch send for this peer (50ms batching window)
-    _peerIceBatchTimers[peerId] = Timer(const Duration(milliseconds: 50), () {
+    // Schedule batch send for this peer (20ms batching window - reduced from 50ms for faster connection)
+    _peerIceBatchTimers[peerId] = Timer(const Duration(milliseconds: 20), () {
       _sendBatchedIceCandidates(peerId);
     });
   }
@@ -1133,20 +1186,34 @@ class LiveStreamingService {
       // Use native Android audio manager for reliable audio routing
       debugPrint('LiveStream: Configuring native audio for voice chat...');
 
-      // First, configure Android AudioManager for voice communication mode
+      // Check if Bluetooth is connected first
+      final bluetoothStatus = await NativeAudioService.isBluetoothAudioConnected();
+      final isBluetoothConnected = bluetoothStatus['isConnected'] as bool? ?? false;
+      debugPrint('LiveStream: Bluetooth audio connected: $isBluetoothConnected');
+      if (isBluetoothConnected) {
+        debugPrint('LiveStream: Bluetooth device: ${bluetoothStatus['deviceName']} (${bluetoothStatus['deviceType']})');
+      }
+
+      // Configure Android AudioManager for voice communication mode
+      // This handles Bluetooth vs speaker routing internally
       final modeSet = await NativeAudioService.setAudioModeForVoiceChat();
       debugPrint('LiveStream: Native audio mode set: $modeSet');
 
-      // Then enable speakerphone via native code
-      final speakerSet = await NativeAudioService.setSpeakerOn(true);
-      debugPrint('LiveStream: Native speakerphone enabled: $speakerSet');
+      // If NO Bluetooth connected, force speaker ON as backup
+      if (!isBluetoothConnected) {
+        // Enable speaker via Flutter WebRTC Helper
+        try {
+          await Helper.setSpeakerphoneOn(true);
+          debugPrint('LiveStream: Flutter Helper speakerphone enabled');
+        } catch (e) {
+          debugPrint('LiveStream: Flutter Helper speakerphone failed (ok): $e');
+        }
 
-      // Also try the flutter_webrtc Helper as backup
-      try {
-        await Helper.setSpeakerphoneOn(true);
-        debugPrint('LiveStream: Flutter Helper speakerphone also enabled');
-      } catch (e) {
-        debugPrint('LiveStream: Flutter Helper speakerphone failed (ok): $e');
+        // Force speaker ON via native as well to be absolutely sure
+        await NativeAudioService.setSpeakerOn(true);
+        debugPrint('LiveStream: Forced native speaker ON');
+      } else {
+        debugPrint('LiveStream: Using Bluetooth audio, not forcing speaker');
       }
 
       // Log audio state for debugging
@@ -1171,12 +1238,22 @@ class LiveStreamingService {
       // Use a short delay to let Android audio system settle
       await Future.delayed(const Duration(milliseconds: 100));
 
-      // Re-confirm speaker is on (belt and suspenders approach)
+      // Re-confirm audio routing (speaker if no Bluetooth)
       try {
-        await NativeAudioService.setSpeakerOn(true);
-        await Helper.setSpeakerphoneOn(true);
+        final bluetoothStatus = await NativeAudioService.isBluetoothAudioConnected();
+        final isBluetoothConnected = bluetoothStatus['isConnected'] as bool? ?? false;
+
+        if (!isBluetoothConnected) {
+          // No Bluetooth - ensure speaker is ON
+          await NativeAudioService.setSpeakerOn(true);
+          await Helper.setSpeakerphoneOn(true);
+          debugPrint('LiveStream: Re-confirmed speaker is ON');
+        } else {
+          debugPrint('LiveStream: Using Bluetooth, not forcing speaker');
+        }
       } catch (e) {
         // Ignore - audio should already be configured
+        debugPrint('LiveStream: Audio re-routing skipped: $e');
       }
 
       // Log final state for debugging
@@ -1398,6 +1475,13 @@ class LiveStreamingService {
       }
       await _localStream!.dispose();
       _localStream = null;
+    }
+
+    // Stop Bluetooth SCO if running
+    try {
+      await NativeAudioService.stopBluetoothSco();
+    } catch (e) {
+      debugPrint('LiveStream: Error stopping Bluetooth SCO during dispose: $e');
     }
 
     // Reset audio mode to normal so it doesn't affect other apps

@@ -90,13 +90,13 @@ class MessageRepository {
     );
   }
 
-  /// Get messages stream for a channel
+  /// Get messages stream for a channel (use sparingly - continuous reads)
   Stream<List<MessageModel>> getChannelMessages(String channelId) {
     debugPrint('MessageRepo: Fetching messages for channel $channelId');
     return _messagesRef
         .where('channelId', isEqualTo: channelId)
         .orderBy('timestamp', descending: true)
-        .limit(50)
+        .limit(20) // Reduced from 50 to save reads
         .snapshots()
         .map((snapshot) {
           debugPrint('MessageRepo: Got ${snapshot.docs.length} messages');
@@ -104,13 +104,73 @@ class MessageRepository {
         });
   }
 
-  /// Get recent audio messages for a channel
+  /// Get the LAST audio message only - ONE TIME fetch (saves reads)
+  /// Use this for auto-play feature instead of streaming
+  /// Only fetches 3 messages to minimize Firestore reads
+  Future<MessageModel?> getLastAudioMessage(String channelId) async {
+    try {
+      // Get only last 3 messages - most recent is usually audio in PTT app
+      final snapshot = await _messagesRef
+          .where('channelId', isEqualTo: channelId)
+          .orderBy('timestamp', descending: true)
+          .limit(3) // Minimal fetch - save Firestore reads
+          .get();
+
+      if (snapshot.docs.isEmpty) {
+        debugPrint('MessageRepo: No messages found in channel $channelId');
+        return null;
+      }
+
+      // Find the first audio message
+      for (final doc in snapshot.docs) {
+        final message = MessageModel.fromFirestore(doc);
+        if (message.type == MessageType.audio && message.audioUrl != null) {
+          debugPrint('MessageRepo: Found last audio message ${message.id}');
+          return message;
+        }
+      }
+
+      debugPrint('MessageRepo: No audio messages in last 3 messages');
+      return null;
+    } catch (e) {
+      debugPrint('MessageRepo: Error getting last audio message: $e');
+      rethrow;
+    }
+  }
+
+  /// Get recent audio messages ONE TIME (not a stream - saves reads)
+  Future<List<MessageModel>> getRecentAudioMessagesOnce(String channelId, {int limit = 10}) async {
+    try {
+      // Get recent messages and filter for audio type in code
+      // This avoids needing a composite Firestore index
+      final snapshot = await _messagesRef
+          .where('channelId', isEqualTo: channelId)
+          .orderBy('timestamp', descending: true)
+          .limit(limit * 2) // Get more to ensure we have enough audio messages
+          .get();
+
+      final audioMessages = snapshot.docs
+          .map((doc) => MessageModel.fromFirestore(doc))
+          .where((m) => m.type == MessageType.audio && m.audioUrl != null)
+          .take(limit)
+          .toList();
+
+      debugPrint('MessageRepo: Found ${audioMessages.length} audio messages');
+      return audioMessages;
+    } catch (e) {
+      debugPrint('MessageRepo: Error getting recent audio messages: $e');
+      rethrow;
+    }
+  }
+
+  /// Get recent audio messages as stream (use sparingly)
+  @Deprecated('Use getRecentAudioMessagesOnce or getLastAudioMessage instead to save reads')
   Stream<List<MessageModel>> getRecentAudioMessages(String channelId) {
     return _messagesRef
         .where('channelId', isEqualTo: channelId)
         .where('type', isEqualTo: MessageType.audio.name)
         .orderBy('timestamp', descending: true)
-        .limit(20)
+        .limit(10) // Reduced from 20
         .snapshots()
         .map((snapshot) =>
             snapshot.docs.map((doc) => MessageModel.fromFirestore(doc)).toList());

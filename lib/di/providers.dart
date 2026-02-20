@@ -12,7 +12,7 @@ final authStateProvider = StreamProvider<User?>((ref) {
   return authRepo.authStateChanges;
 });
 
-// Current user provider - fetches full user data from Firestore
+// Current user provider - fetches full user data from Firestore (ONE-TIME read, cached)
 final currentUserProvider = FutureProvider<UserModel?>((ref) async {
   final authState = ref.watch(authStateProvider);
   final user = authState.value;
@@ -22,24 +22,19 @@ final currentUserProvider = FutureProvider<UserModel?>((ref) async {
   return authRepo.getUserById(user.uid);
 });
 
-// User stream provider - real-time updates for current user
-final currentUserStreamProvider = StreamProvider<UserModel?>((ref) {
+// REMOVED: currentUserStreamProvider - was causing duplicate reads
+// Use currentUserProvider instead and invalidate when needed:
+// ref.invalidate(currentUserProvider);
+
+// User channels provider - ONE-TIME fetch, not real-time stream (saves reads)
+// Invalidate this provider when you need to refresh: ref.invalidate(userChannelsProvider)
+final userChannelsProvider = FutureProvider<List<ChannelModel>>((ref) async {
   final authState = ref.watch(authStateProvider);
   final user = authState.value;
-  if (user == null) return Stream.value(null);
-
-  final authRepo = ref.watch(authRepositoryProvider);
-  return authRepo.userStream(user.uid);
-});
-
-// User channels provider - real-time list of user's channels
-final userChannelsProvider = StreamProvider<List<ChannelModel>>((ref) {
-  final authState = ref.watch(authStateProvider);
-  final user = authState.value;
-  if (user == null) return Stream.value([]);
+  if (user == null) return [];
 
   final channelRepo = ref.watch(channelRepositoryProvider);
-  return channelRepo.getUserChannels(user.uid);
+  return channelRepo.getUserChannelsOnce(user.uid);
 });
 
 // Single channel provider - for channel detail screen

@@ -200,21 +200,7 @@ class _VoicelyAppState extends ConsumerState<VoicelyApp> {
         return;
       }
 
-      // Legacy handling for voice messages with audio URLs
-      final data = message.data;
-      final audioUrl = data['audioUrl'];
-      final senderName = data['senderName'] ?? 'Someone';
-      final channelName = data['channelName'] ?? 'Channel';
-      final autoPlay = data['autoPlay'] == 'true';
-
-      if (audioUrl != null && autoPlay) {
-        final service = BackgroundAudioService();
-        service.playAudio(
-          audioUrl: audioUrl,
-          senderName: senderName,
-          channelName: channelName,
-        );
-      }
+      // Legacy voice message notifications - no auto-play, user can replay manually
     });
 
     // Handle notification taps when app is in background (but not killed)

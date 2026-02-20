@@ -1,7 +1,13 @@
 package com.bitsoft.voicely
 
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothHeadset
+import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothA2dp
 import android.content.Context
 import android.content.Intent
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.ToneGenerator
@@ -65,6 +71,24 @@ class MainActivity : FlutterActivity() {
                 "isNoiseSuppressionAvailable" -> {
                     result.success(isNoiseSuppressionAvailable())
                 }
+                "isBluetoothAudioConnected" -> {
+                    result.success(isBluetoothAudioConnected())
+                }
+                "routeAudioToAppropriateDevice" -> {
+                    routeAudioToAppropriateDevice()
+                    result.success(true)
+                }
+                "startBluetoothScoForMic" -> {
+                    result.success(startBluetoothScoForMicrophone())
+                }
+                "stopBluetoothSco" -> {
+                    stopBluetoothScoConnection()
+                    result.success(true)
+                }
+                "setAudioModeForPlayback" -> {
+                    setAudioModeForPlayback()
+                    result.success(true)
+                }
                 else -> {
                     result.notImplemented()
                 }
@@ -116,7 +140,11 @@ class MainActivity : FlutterActivity() {
 
         // Set mode for voice communication
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+
+        // CRITICAL: Force speaker ON immediately after setting mode
+        // MODE_IN_COMMUNICATION defaults to earpiece, we want speaker
         audioManager.isSpeakerphoneOn = true
+        android.util.Log.d("VoicelyAudio", "Forced speakerphone ON after MODE_IN_COMMUNICATION")
 
         // CRITICAL: Set all relevant stream volumes to max
         try {
@@ -127,26 +155,35 @@ class MainActivity : FlutterActivity() {
             // Music stream (WebRTC might use this for playback)
             val maxMusicVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, maxMusicVolume, 0)
-
-            // Communication stream (alternate stream for VoIP)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                // No direct STREAM_COMMUNICATION, but ensure volume is up
-            }
         } catch (e: Exception) {
             // Volume setting failed, continue anyway
         }
 
-        // For Android 12+, explicitly set speaker as communication device
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            try {
-                val devices = audioManager.availableCommunicationDevices
-                val speaker = devices.find { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-                if (speaker != null) {
-                    val result = audioManager.setCommunicationDevice(speaker)
-                    android.util.Log.d("VoicelyAudio", "setCommunicationDevice(speaker) = $result")
+        // Check if Bluetooth is ACTUALLY connected before routing to it
+        val bluetoothStatus = isBluetoothAudioConnected()
+        val isBluetoothConnected = bluetoothStatus["isConnected"] as Boolean
+
+        if (isBluetoothConnected) {
+            // Route to Bluetooth only if truly connected
+            android.util.Log.d("VoicelyAudio", "Bluetooth device detected, routing to Bluetooth")
+            routeAudioToAppropriateDevice()
+        } else {
+            // No Bluetooth - ensure speaker is ON
+            android.util.Log.d("VoicelyAudio", "No Bluetooth device, ensuring speaker is ON")
+            audioManager.isSpeakerphoneOn = true
+
+            // For Android 12+, explicitly set speaker as communication device
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                try {
+                    val devices = audioManager.availableCommunicationDevices
+                    val speaker = devices.find { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                    if (speaker != null) {
+                        val result = audioManager.setCommunicationDevice(speaker)
+                        android.util.Log.d("VoicelyAudio", "setCommunicationDevice(speaker) = $result")
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("VoicelyAudio", "Failed to set speaker as communication device", e)
                 }
-            } catch (e: Exception) {
-                android.util.Log.e("VoicelyAudio", "Failed to set communication device", e)
             }
         }
     }
@@ -336,5 +373,366 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) {
             android.util.Log.e("VoicelyAudio", "Error disabling noise suppression", e)
         }
+    }
+
+    /**
+     * Check if any Bluetooth audio device is connected (headset, speaker, earbuds)
+     * Checks both A2DP (media) and SCO (call/communication) profiles
+     */
+    private fun isBluetoothAudioConnected(): Map<String, Any> {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        var isConnected = false
+        var deviceName: String? = null
+        var deviceType: String? = null
+
+        try {
+            // For Android 12+, use the modern API
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val devices = audioManager.availableCommunicationDevices
+                for (device in devices) {
+                    when (device.type) {
+                        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                        AudioDeviceInfo.TYPE_BLE_HEADSET,
+                        AudioDeviceInfo.TYPE_BLE_SPEAKER -> {
+                            isConnected = true
+                            deviceName = device.productName?.toString() ?: "Bluetooth Device"
+                            deviceType = when (device.type) {
+                                AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "SCO"
+                                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "A2DP"
+                                AudioDeviceInfo.TYPE_BLE_HEADSET -> "BLE_HEADSET"
+                                AudioDeviceInfo.TYPE_BLE_SPEAKER -> "BLE_SPEAKER"
+                                else -> "BLUETOOTH"
+                            }
+                            android.util.Log.d("VoicelyAudio", "Found Bluetooth device: $deviceName ($deviceType)")
+                            break
+                        }
+                    }
+                }
+            }
+
+            // Also check using legacy method for broader compatibility
+            // Note: Only check isBluetoothScoOn (actually connected), NOT isBluetoothScoAvailableOffCall (just availability)
+            if (!isConnected) {
+                // Check if Bluetooth SCO is actually ON (not just available)
+                if (audioManager.isBluetoothScoOn) {
+                    isConnected = true
+                    deviceType = "SCO_LEGACY"
+                    android.util.Log.d("VoicelyAudio", "Bluetooth SCO is ON (legacy check)")
+                }
+
+                // Check if Bluetooth A2DP is on (for media)
+                if (audioManager.isBluetoothA2dpOn) {
+                    isConnected = true
+                    deviceType = "A2DP_LEGACY"
+                    android.util.Log.d("VoicelyAudio", "Bluetooth A2DP on (legacy check)")
+                }
+            }
+
+            // For Android 6+, check audio devices directly
+            if (!isConnected && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                for (device in outputDevices) {
+                    when (device.type) {
+                        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> {
+                            isConnected = true
+                            deviceName = device.productName?.toString() ?: "Bluetooth Device"
+                            deviceType = if (device.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) "SCO" else "A2DP"
+                            android.util.Log.d("VoicelyAudio", "Found Bluetooth output device: $deviceName ($deviceType)")
+                            break
+                        }
+                    }
+                }
+            }
+
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyAudio", "Error checking Bluetooth audio", e)
+        }
+
+        android.util.Log.d("VoicelyAudio", "Bluetooth audio connected: $isConnected, device: $deviceName, type: $deviceType")
+
+        return mapOf(
+            "isConnected" to isConnected,
+            "deviceName" to (deviceName ?: ""),
+            "deviceType" to (deviceType ?: "")
+        )
+    }
+
+    /**
+     * Route audio to the appropriate device:
+     * - If Bluetooth is connected, route to Bluetooth
+     * - Otherwise, route to speaker
+     */
+    private fun routeAudioToAppropriateDevice() {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val bluetoothStatus = isBluetoothAudioConnected()
+        val isBluetoothConnected = bluetoothStatus["isConnected"] as Boolean
+
+        android.util.Log.d("VoicelyAudio", "Routing audio - Bluetooth connected: $isBluetoothConnected")
+
+        if (isBluetoothConnected) {
+            // Route to Bluetooth
+            routeToBluetoothAudio(audioManager)
+        } else {
+            // Route to speaker
+            routeToSpeaker(audioManager)
+        }
+    }
+
+    /**
+     * Route audio to Bluetooth device
+     */
+    private fun routeToBluetoothAudio(audioManager: AudioManager) {
+        android.util.Log.d("VoicelyAudio", "Routing audio to Bluetooth...")
+
+        // Disable speakerphone first
+        audioManager.isSpeakerphoneOn = false
+
+        // For Android 12+, use setCommunicationDevice
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                val devices = audioManager.availableCommunicationDevices
+                // Find Bluetooth device (prefer BLE, then A2DP, then SCO)
+                val bluetoothDevice = devices.find {
+                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_BLE_SPEAKER
+                } ?: devices.find {
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+                } ?: devices.find {
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                }
+
+                if (bluetoothDevice != null) {
+                    val result = audioManager.setCommunicationDevice(bluetoothDevice)
+                    android.util.Log.d("VoicelyAudio", "setCommunicationDevice(Bluetooth ${bluetoothDevice.productName}) = $result")
+                } else {
+                    android.util.Log.w("VoicelyAudio", "No Bluetooth communication device found, using legacy method")
+                    // Fallback to legacy SCO
+                    startBluetoothSco(audioManager)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("VoicelyAudio", "Failed to set Bluetooth communication device", e)
+                startBluetoothSco(audioManager)
+            }
+        } else {
+            // Legacy: Start Bluetooth SCO for voice communication
+            startBluetoothSco(audioManager)
+        }
+    }
+
+    /**
+     * Start Bluetooth SCO connection for voice communication (legacy method)
+     */
+    private fun startBluetoothSco(audioManager: AudioManager) {
+        try {
+            if (audioManager.isBluetoothScoAvailableOffCall) {
+                audioManager.startBluetoothSco()
+                audioManager.isBluetoothScoOn = true
+                android.util.Log.d("VoicelyAudio", "Started Bluetooth SCO")
+            } else {
+                android.util.Log.w("VoicelyAudio", "Bluetooth SCO not available off call")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyAudio", "Failed to start Bluetooth SCO", e)
+        }
+    }
+
+    /**
+     * Start Bluetooth SCO connection for microphone input (call this BEFORE getUserMedia)
+     * Returns true if Bluetooth SCO was successfully started
+     */
+    private fun startBluetoothScoForMicrophone(): Map<String, Any> {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val bluetoothStatus = isBluetoothAudioConnected()
+        val isBluetoothConnected = bluetoothStatus["isConnected"] as Boolean
+
+        if (!isBluetoothConnected) {
+            android.util.Log.d("VoicelyAudio", "No Bluetooth device connected, using built-in mic")
+            return mapOf<String, Any>(
+                "success" to false,
+                "reason" to "no_bluetooth",
+                "usingBuiltInMic" to true
+            )
+        }
+
+        android.util.Log.d("VoicelyAudio", "Starting Bluetooth SCO for microphone input...")
+
+        // Set communication mode first
+        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+
+        // For Android 12+, use setCommunicationDevice for both input and output
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                val devices = audioManager.availableCommunicationDevices
+                // Find Bluetooth device that supports both input and output (SCO devices)
+                val bluetoothDevice = devices.find {
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                } ?: devices.find {
+                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+                }
+
+                if (bluetoothDevice != null) {
+                    // Disable speakerphone first
+                    audioManager.isSpeakerphoneOn = false
+
+                    val result = audioManager.setCommunicationDevice(bluetoothDevice)
+                    android.util.Log.d("VoicelyAudio", "setCommunicationDevice for mic (${bluetoothDevice.productName}) = $result")
+
+                    return mapOf<String, Any>(
+                        "success" to result,
+                        "deviceName" to (bluetoothDevice.productName?.toString() ?: "Bluetooth"),
+                        "deviceType" to "SCO",
+                        "usingBuiltInMic" to false
+                    )
+                } else {
+                    android.util.Log.w("VoicelyAudio", "No Bluetooth SCO device found, trying legacy method")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("VoicelyAudio", "Failed to set Bluetooth communication device for mic", e)
+            }
+        }
+
+        // Legacy method: Start Bluetooth SCO
+        return try {
+            if (audioManager.isBluetoothScoAvailableOffCall) {
+                // Disable speakerphone first
+                audioManager.isSpeakerphoneOn = false
+
+                // Start SCO connection
+                audioManager.startBluetoothSco()
+                audioManager.isBluetoothScoOn = true
+
+                android.util.Log.d("VoicelyAudio", "Started Bluetooth SCO for microphone (legacy)")
+
+                mapOf<String, Any>(
+                    "success" to true,
+                    "deviceName" to (bluetoothStatus["deviceName"] ?: "Bluetooth"),
+                    "deviceType" to "SCO_LEGACY",
+                    "usingBuiltInMic" to false
+                )
+            } else {
+                android.util.Log.w("VoicelyAudio", "Bluetooth SCO not available off call")
+                mapOf<String, Any>(
+                    "success" to false,
+                    "reason" to "sco_not_available",
+                    "usingBuiltInMic" to true
+                )
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyAudio", "Failed to start Bluetooth SCO for mic", e)
+            mapOf<String, Any>(
+                "success" to false,
+                "reason" to (e.message ?: "unknown_error"),
+                "usingBuiltInMic" to true
+            )
+        }
+    }
+
+    /**
+     * Stop Bluetooth SCO connection (call this when done with microphone)
+     */
+    private fun stopBluetoothScoConnection() {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        try {
+            if (audioManager.isBluetoothScoOn) {
+                audioManager.stopBluetoothSco()
+                audioManager.isBluetoothScoOn = false
+                android.util.Log.d("VoicelyAudio", "Stopped Bluetooth SCO")
+            }
+
+            // Clear communication device on Android 12+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                try {
+                    audioManager.clearCommunicationDevice()
+                    android.util.Log.d("VoicelyAudio", "Cleared communication device")
+                } catch (e: Exception) {
+                    android.util.Log.e("VoicelyAudio", "Failed to clear communication device", e)
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyAudio", "Error stopping Bluetooth SCO", e)
+        }
+    }
+
+    /**
+     * Route audio to the built-in speaker
+     */
+    private fun routeToSpeaker(audioManager: AudioManager) {
+        android.util.Log.d("VoicelyAudio", "Routing audio to speaker...")
+
+        // Stop Bluetooth SCO if running
+        try {
+            if (audioManager.isBluetoothScoOn) {
+                audioManager.stopBluetoothSco()
+                audioManager.isBluetoothScoOn = false
+                android.util.Log.d("VoicelyAudio", "Stopped Bluetooth SCO")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyAudio", "Error stopping Bluetooth SCO", e)
+        }
+
+        // Enable speakerphone
+        audioManager.isSpeakerphoneOn = true
+
+        // For Android 12+, explicitly set speaker as communication device
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                val devices = audioManager.availableCommunicationDevices
+                val speaker = devices.find { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                if (speaker != null) {
+                    val result = audioManager.setCommunicationDevice(speaker)
+                    android.util.Log.d("VoicelyAudio", "setCommunicationDevice(speaker) = $result")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("VoicelyAudio", "Failed to set speaker as communication device", e)
+            }
+        }
+    }
+
+    /**
+     * Set audio mode for regular media playback (not voice communication)
+     * This resets from MODE_IN_COMMUNICATION to MODE_NORMAL for louder speaker output
+     */
+    private fun setAudioModeForPlayback() {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        android.util.Log.d("VoicelyAudio", "Setting audio mode for playback (MODE_NORMAL)")
+
+        // Clear any communication device setting (Android 12+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                audioManager.clearCommunicationDevice()
+            } catch (e: Exception) {
+                android.util.Log.e("VoicelyAudio", "Error clearing communication device", e)
+            }
+        }
+
+        // Stop Bluetooth SCO if active
+        try {
+            if (audioManager.isBluetoothScoOn) {
+                audioManager.stopBluetoothSco()
+                audioManager.isBluetoothScoOn = false
+            }
+        } catch (e: Exception) {
+            // Ignore
+        }
+
+        // Set mode to normal for regular media playback
+        audioManager.mode = AudioManager.MODE_NORMAL
+
+        // Enable speakerphone for loud output
+        audioManager.isSpeakerphoneOn = true
+
+        // Set music stream to max volume
+        try {
+            val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, maxVolume, 0)
+        } catch (e: Exception) {
+            // Ignore volume errors
+        }
+
+        android.util.Log.d("VoicelyAudio", "Audio mode set to NORMAL with speaker enabled")
     }
 }

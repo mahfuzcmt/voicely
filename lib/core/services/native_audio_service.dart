@@ -137,4 +137,71 @@ class NativeAudioService {
       return false;
     }
   }
+
+  /// Check if Bluetooth audio device is connected (headset, speaker, earbuds)
+  /// Returns a map with: isConnected (bool), deviceName (String), deviceType (String)
+  static Future<Map<String, dynamic>> isBluetoothAudioConnected() async {
+    try {
+      final result = await _channel.invokeMethod('isBluetoothAudioConnected');
+      debugPrint('NativeAudio: isBluetoothAudioConnected = $result');
+      return Map<String, dynamic>.from(result);
+    } catch (e) {
+      debugPrint('NativeAudio: Error checking Bluetooth audio: $e');
+      return {'isConnected': false, 'deviceName': '', 'deviceType': ''};
+    }
+  }
+
+  /// Route audio to the appropriate device (Bluetooth if connected, otherwise speaker)
+  /// This should be called instead of setSpeakerOn(true) to respect Bluetooth devices
+  static Future<bool> routeAudioToAppropriateDevice() async {
+    try {
+      final result = await _channel.invokeMethod('routeAudioToAppropriateDevice');
+      debugPrint('NativeAudio: routeAudioToAppropriateDevice = $result');
+      return result == true;
+    } catch (e) {
+      debugPrint('NativeAudio: Error routing audio: $e');
+      return false;
+    }
+  }
+
+  /// Start Bluetooth SCO for microphone input
+  /// Call this BEFORE getUserMedia() when broadcasting to use Bluetooth mic
+  /// Returns a map with: success (bool), deviceName (String), usingBuiltInMic (bool)
+  static Future<Map<String, dynamic>> startBluetoothScoForMic() async {
+    try {
+      final result = await _channel.invokeMethod('startBluetoothScoForMic');
+      debugPrint('NativeAudio: startBluetoothScoForMic = $result');
+      return Map<String, dynamic>.from(result);
+    } catch (e) {
+      debugPrint('NativeAudio: Error starting Bluetooth SCO for mic: $e');
+      return {'success': false, 'reason': e.toString(), 'usingBuiltInMic': true};
+    }
+  }
+
+  /// Stop Bluetooth SCO connection
+  /// Call this when done with microphone/broadcasting
+  static Future<bool> stopBluetoothSco() async {
+    try {
+      final result = await _channel.invokeMethod('stopBluetoothSco');
+      debugPrint('NativeAudio: stopBluetoothSco = $result');
+      return result == true;
+    } catch (e) {
+      debugPrint('NativeAudio: Error stopping Bluetooth SCO: $e');
+      return false;
+    }
+  }
+
+  /// Set audio mode for regular media playback (loud speaker, normal mode)
+  /// Call this before playing recorded voice messages for better sound quality
+  /// This resets from MODE_IN_COMMUNICATION to MODE_NORMAL
+  static Future<bool> setAudioModeForPlayback() async {
+    try {
+      final result = await _channel.invokeMethod('setAudioModeForPlayback');
+      debugPrint('NativeAudio: setAudioModeForPlayback = $result');
+      return result == true;
+    } catch (e) {
+      debugPrint('NativeAudio: Error setting playback mode: $e');
+      return false;
+    }
+  }
 }

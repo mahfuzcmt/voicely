@@ -1,8 +1,31 @@
 import 'dart:async';
-import 'package:firebase_messaging/firebase_messaging.dart';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:audio_session/audio_session.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'native_audio_service.dart';
+
+const String _lastAutoPlayedKey = 'last_auto_played_message_id';
+
+/// Get the last auto-played message ID (persisted across isolates)
+Future<String?> getLastAutoPlayedMessageId() async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getString(_lastAutoPlayedKey);
+}
+
+/// Set the last auto-played message ID (persisted across isolates)
+Future<void> setLastAutoPlayedMessageId(String messageId) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString(_lastAutoPlayedKey, messageId);
+}
+
+/// Clear the last auto-played message ID
+Future<void> clearLastAutoPlayedMessageId() async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.remove(_lastAutoPlayedKey);
+}
 
 /// Background audio service for playing voice messages
 /// even when app is in background or screen is locked
@@ -53,6 +76,13 @@ class BackgroundAudioService {
     try {
       debugPrint('BackgroundAudioService: Playing audio from $audioUrl');
 
+      // Set audio mode for loud speaker playback (Android only)
+      if (Platform.isAndroid) {
+        await NativeAudioService.setAudioModeForPlayback();
+        // Small delay to ensure audio mode change takes effect
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+
       // Play audio (no notification)
       await _audioPlayer?.stop();
       await _audioPlayer?.setUrl(audioUrl);
@@ -98,24 +128,6 @@ class BackgroundAudioService {
   }
 }
 
-/// FCM background message handler - must be top-level function
-@pragma('vm:entry-point')
-Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  debugPrint('BackgroundAudioService: Handling background message: ${message.messageId}');
-
-  final data = message.data;
-  final audioUrl = data['audioUrl'];
-  final senderName = data['senderName'] ?? 'Someone';
-  final channelName = data['channelName'] ?? 'Channel';
-  final autoPlay = data['autoPlay'] == 'true';
-
-  if (audioUrl != null && autoPlay) {
-    final service = BackgroundAudioService();
-    await service.initialize();
-    await service.playAudio(
-      audioUrl: audioUrl,
-      senderName: senderName,
-      channelName: channelName,
-    );
-  }
-}
+// NOTE: The actual FCM background handler is in fcm_ptt_service.dart
+// (handleFcmPttBackgroundMessage) which handles both PTT notifications
+// and auto-play of voice messages.

@@ -319,9 +319,9 @@ class WebSocketSignalingService {
     return List.unmodifiable(_roomMembers[roomId] ?? []);
   }
 
-  /// Connection timeout duration
-  static const Duration _connectionTimeout = Duration(seconds: 15);
-  static const Duration _authTimeout = Duration(seconds: 10);
+  /// Connection timeout duration (reduced for faster connection)
+  static const Duration _connectionTimeout = Duration(seconds: 8);
+  static const Duration _authTimeout = Duration(seconds: 5);
 
   /// Connect to the signaling server
   Future<bool> connect(String authToken, {String? displayName}) async {

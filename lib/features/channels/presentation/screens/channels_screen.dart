@@ -47,7 +47,7 @@ class _ChannelsScreenState extends ConsumerState<ChannelsScreen> {
   @override
   Widget build(BuildContext context) {
     final channelsAsync = ref.watch(userChannelsProvider);
-    final userAsync = ref.watch(currentUserStreamProvider);
+    final userAsync = ref.watch(currentUserProvider); // Changed from Stream to Future (saves reads)
 
     // Check for pending channel from notification tap FIRST
     // This takes priority over single-channel auto-navigation

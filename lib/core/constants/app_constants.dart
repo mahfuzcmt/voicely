@@ -33,28 +33,29 @@ class AppConstants {
   // PTT settings
   static const Duration pttMinDuration = Duration(milliseconds: 300);
   static const Duration pttMaxDuration = Duration(minutes: 2);
-  static const Duration floorRequestTimeout = Duration(seconds: 5);
+  static const Duration floorRequestTimeout = Duration(seconds: 2); // Reduced from 5s for faster connection
 
   // WebRTC ICE servers configuration
   // IMPORTANT: Order matters! Primary TURN server first for faster connections
+  // UDP-only first for speed (TCP fallback is slower)
   static const List<Map<String, dynamic>> iceServers = [
     // Primary: Your coturn TURN server (most reliable for your setup)
-    // Listed first for priority in ICE candidate gathering
+    // UDP only first for faster connection (no TCP fallback overhead)
     {
       'urls': [
-        'turn:103.159.37.167:3478',
+        'turn:103.159.37.167:3478', // UDP first - fastest
+      ],
+      'username': 'voicely',
+      'credential': 'VoicelyTurn2024Secure',
+    },
+    // Secondary: Same server with TCP/TLS fallback (only if UDP fails)
+    {
+      'urls': [
         'turn:103.159.37.167:3478?transport=tcp',
         'turns:voicelyent.xyz:5349', // TLS requires hostname for certificate validation
       ],
       'username': 'voicely',
       'credential': 'VoicelyTurn2024Secure',
-    },
-    // STUN servers for NAT traversal (fast, no relay overhead)
-    {
-      'urls': [
-        'stun:stun.l.google.com:19302',
-        'stun:stun1.l.google.com:19302',
-      ],
     },
     // Fallback: OpenRelay public TURN server (if your server is down)
     {

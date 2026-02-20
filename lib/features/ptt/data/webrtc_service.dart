@@ -67,12 +67,14 @@ class WebRTCService {
   Future<MediaStream?> initLocalStream() async {
     try {
       // Try with full audio constraints first
+      // Note: Don't specify sampleRate - let WebRTC use default 48000 Hz
+      // Specifying 16000 Hz causes playback speed issues
       final constraints = {
         'audio': {
           'echoCancellation': true,
           'noiseSuppression': true,
           'autoGainControl': true,
-          'sampleRate': AppConstants.audioSampleRate,
+          // sampleRate removed - WebRTC handles this automatically
           // Enhanced noise suppression (Google's experimental options)
           'googNoiseSuppression': true,
           'googHighpassFilter': true,

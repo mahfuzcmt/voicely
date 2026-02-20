@@ -83,14 +83,29 @@ class ChannelRepository {
     return ChannelModel.fromFirestore(doc);
   }
 
+  /// Get user channels as a stream (use sparingly - causes continuous reads)
   Stream<List<ChannelModel>> getUserChannels(String userId) {
     return _channelsRef
         .where('memberIds', arrayContains: userId)
         .orderBy('updatedAt', descending: true)
+        .limit(50) // Limit to reduce reads
         .snapshots()
         .map((snapshot) => snapshot.docs
             .map((doc) => ChannelModel.fromFirestore(doc))
             .toList());
+  }
+
+  /// Get user channels ONE TIME (preferred - saves reads)
+  /// Call ref.invalidate(userChannelsProvider) to refresh
+  Future<List<ChannelModel>> getUserChannelsOnce(String userId) async {
+    final snapshot = await _channelsRef
+        .where('memberIds', arrayContains: userId)
+        .orderBy('updatedAt', descending: true)
+        .limit(50)
+        .get();
+    return snapshot.docs
+        .map((doc) => ChannelModel.fromFirestore(doc))
+        .toList();
   }
 
   Stream<ChannelModel?> channelStream(String channelId) {
@@ -176,14 +191,30 @@ class ChannelRepository {
         .delete();
   }
 
+  /// Get channel members with limit (reduces reads for large channels)
   Stream<List<ChannelMember>> getChannelMembers(String channelId) {
     return _channelsRef
         .doc(channelId)
         .collection('members')
+        .orderBy('joinedAt', descending: true)
+        .limit(100) // Limit to 100 members to reduce reads
         .snapshots()
         .map((snapshot) => snapshot.docs
             .map((doc) => ChannelMember.fromFirestore(doc))
             .toList());
+  }
+
+  /// Get channel members ONE TIME (preferred for member lists)
+  Future<List<ChannelMember>> getChannelMembersOnce(String channelId) async {
+    final snapshot = await _channelsRef
+        .doc(channelId)
+        .collection('members')
+        .orderBy('joinedAt', descending: true)
+        .limit(100)
+        .get();
+    return snapshot.docs
+        .map((doc) => ChannelMember.fromFirestore(doc))
+        .toList();
   }
 
   Future<List<ChannelModel>> searchChannels(String query) async {

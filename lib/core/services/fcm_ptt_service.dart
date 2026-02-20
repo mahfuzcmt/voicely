@@ -8,6 +8,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'background_audio_service.dart';
+
 /// FCM message types for PTT
 enum FcmPttMessageType {
   /// Someone started speaking in a channel (high priority wake-up)
@@ -234,6 +236,29 @@ Future<void> handleFcmPttBackgroundMessage(RemoteMessage message) async {
       channelName: channelName,
       channelId: channelId,
     );
+  }
+
+  // Auto-play voice messages in background (only once per message)
+  final audioUrl = data['audioUrl'] as String?;
+  final messageId = data['messageId'] as String?;
+  if (audioUrl != null && messageId != null) {
+    // Check if already played (persisted across isolates)
+    final lastPlayedId = await getLastAutoPlayedMessageId();
+    if (messageId != lastPlayedId) {
+      // Mark as played BEFORE playing to prevent race conditions
+      await setLastAutoPlayedMessageId(messageId);
+      debugPrint('FCM Background: Auto-playing voice message $messageId');
+
+      final audioService = BackgroundAudioService();
+      await audioService.initialize();
+      await audioService.playAudio(
+        audioUrl: audioUrl,
+        senderName: data['senderName'] as String? ?? 'Someone',
+        channelName: data['channelName'] as String? ?? 'Channel',
+      );
+    } else {
+      debugPrint('FCM Background: Message $messageId already played, skipping');
+    }
   }
 
   // Handle the PTT message

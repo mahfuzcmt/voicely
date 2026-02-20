@@ -6,16 +6,12 @@ import '../../../../core/theme/app_colors.dart';
 import '../../../../di/providers.dart';
 import '../../domain/models/user_model.dart';
 
-// Global auto-play setting provider (enabled by default)
-final autoPlayEnabledProvider = StateProvider<bool>((ref) => true);
-
 class ProfileScreen extends ConsumerWidget {
   const ProfileScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final userAsync = ref.watch(currentUserStreamProvider);
-    final autoPlayEnabled = ref.watch(autoPlayEnabledProvider);
+    final userAsync = ref.watch(currentUserProvider); // Changed from Stream to Future (saves reads)
 
     return Scaffold(
       appBar: AppBar(
@@ -99,46 +95,6 @@ class ProfileScreen extends ConsumerWidget {
                     ],
                   ),
                 ),
-
-                // Settings section
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Voice Settings',
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                              color: AppColors.textSecondaryDark,
-                            ),
-                      ),
-                      const SizedBox(height: 8),
-                      Container(
-                        decoration: BoxDecoration(
-                          color: AppColors.cardDark,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: SwitchListTile(
-                          title: const Text('Auto-play voice messages'),
-                          subtitle: Text(
-                            'Automatically play incoming voice messages',
-                            style: TextStyle(
-                              color: AppColors.textSecondaryDark,
-                              fontSize: 12,
-                            ),
-                          ),
-                          value: autoPlayEnabled,
-                          onChanged: (value) {
-                            ref.read(autoPlayEnabledProvider.notifier).state = value;
-                          },
-                          activeColor: AppColors.primary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                const SizedBox(height: 24),
 
                 // About section
                 Padding(

@@ -283,6 +283,30 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     });
   }
 
+  /// Pre-initialize local stream and audio for fast PTT connection
+  /// Called when entering a room to have everything ready before PTT is pressed
+  Future<void> _preInitializeForFastConnection() async {
+    debugPrint('LivePTT: Pre-initializing for fast connection...');
+
+    // Pre-initialize local audio stream (so it's ready when PTT is pressed)
+    try {
+      final streamReady = await _streamingService.preInitializeLocalStream();
+      debugPrint('LivePTT: Local stream pre-initialized: $streamReady');
+    } catch (e) {
+      debugPrint('LivePTT: Failed to pre-initialize local stream: $e');
+    }
+
+    // Pre-configure audio for receiving (so listeners are ready instantly)
+    try {
+      await _streamingService.preConfigureAudioForReceiving();
+      debugPrint('LivePTT: Audio pre-configured for receiving');
+    } catch (e) {
+      debugPrint('LivePTT: Failed to pre-configure audio: $e');
+    }
+
+    debugPrint('LivePTT: Pre-initialization complete');
+  }
+
   /// Check for pending FCM messages when initializing
   Future<void> _checkPendingFcmMessage() async {
     final pendingMessage = await _fcmPttService.checkPendingMessage();
@@ -339,8 +363,19 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
 
     // Reconfigure audio for playback
     try {
+      // Check Bluetooth status first
+      final bluetoothStatus = await NativeAudioService.isBluetoothAudioConnected();
+      final isBluetoothConnected = bluetoothStatus['isConnected'] as bool? ?? false;
+
       await NativeAudioService.setAudioModeForVoiceChat();
-      await NativeAudioService.setSpeakerOn(true);
+
+      // Force speaker ON only if no Bluetooth connected
+      if (!isBluetoothConnected) {
+        await NativeAudioService.setSpeakerOn(true);
+        debugPrint('LivePTT: Speaker enabled (no Bluetooth)');
+      } else {
+        debugPrint('LivePTT: Using Bluetooth audio');
+      }
     } catch (e) {
       debugPrint('LivePTT: Failed to reconfigure audio: $e');
     }
@@ -402,6 +437,8 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       // Auto-join room when authenticated
       if (connState == WSConnectionState.authenticated) {
         _wsService.joinRoom(channelId);
+        // Pre-initialize for fast connection
+        _preInitializeForFastConnection();
       }
     });
 
@@ -576,6 +613,8 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     if (_wsService.isConnected) {
       debugPrint('LivePTT: Already connected, joining room');
       _wsService.joinRoom(channelId);
+      // Pre-initialize for fast connection
+      _preInitializeForFastConnection();
       return;
     }
 
