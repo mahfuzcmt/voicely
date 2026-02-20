@@ -157,9 +157,27 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+    if (error.code === 'auth/weak-password') {
+      return NextResponse.json(
+        { error: 'Password must be at least 6 characters' },
+        { status: 400 }
+      );
+    }
+    if (error.code === 'auth/invalid-email') {
+      return NextResponse.json(
+        { error: 'Invalid phone number format' },
+        { status: 400 }
+      );
+    }
+    if (error.code === 'app/no-app' || error.code === 'app/invalid-credential') {
+      return NextResponse.json(
+        { error: 'Firebase Admin SDK is not configured. Check FIREBASE_SERVICE_ACCOUNT environment variable.' },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json(
-      { error: 'Failed to create user' },
+      { error: error.message || 'Failed to create user' },
       { status: 500 }
     );
   }
