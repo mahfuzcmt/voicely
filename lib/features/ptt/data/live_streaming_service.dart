@@ -99,6 +99,7 @@ class LiveStreamingService {
   StreamSubscription? _floorDeniedSubscription;
   StreamSubscription? _connectionSubscription;
   StreamSubscription? _memberJoinedSubscription;
+  StreamSubscription? _offerRequestSubscription;
   Timer? _floorRequestTimeout;
   Timer? _errorRecoveryTimer;
 
@@ -154,6 +155,10 @@ class LiveStreamingService {
   final _listenerCountController = StreamController<int>.broadcast();
   Stream<int> get listenerCountStream => _listenerCountController.stream;
 
+  /// Stream of listener join events (listener name when they connect)
+  final _listenerJoinedController = StreamController<String>.broadcast();
+  Stream<String> get listenerJoinedStream => _listenerJoinedController.stream;
+
   /// Set muted state for incoming audio
   void setMuted(bool muted) {
     _isMuted = muted;
@@ -166,6 +171,144 @@ class LiveStreamingService {
         debugPrint('LiveStreaming: Audio track ${track.id} enabled: ${!muted}');
       }
     }
+  }
+
+  /// Check if peer connections are healthy (not closed/failed)
+  /// Returns true if we have at least one active connection, false otherwise
+  bool hasHealthyPeerConnections() {
+    if (_peerConnections.isEmpty) return false;
+
+    for (final entry in _peerConnections.entries) {
+      final pc = entry.value;
+      final iceState = pc.iceConnectionState;
+      // Consider connected/completed/checking as healthy
+      if (iceState == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          iceState == RTCIceConnectionState.RTCIceConnectionStateCompleted ||
+          iceState == RTCIceConnectionState.RTCIceConnectionStateChecking ||
+          iceState == RTCIceConnectionState.RTCIceConnectionStateNew) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Clean up stale peer connections (ICE closed/failed/disconnected)
+  /// Call this when coming back to foreground to prepare for reconnection
+  Future<void> cleanupStalePeerConnections() async {
+    final stalePeers = <String>[];
+
+    for (final entry in _peerConnections.entries) {
+      final peerId = entry.key;
+      final pc = entry.value;
+      final iceState = pc.iceConnectionState;
+
+      // Check if ICE is in a terminal or stale state
+      if (iceState == RTCIceConnectionState.RTCIceConnectionStateClosed ||
+          iceState == RTCIceConnectionState.RTCIceConnectionStateFailed ||
+          iceState == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+        debugPrint('LiveStream: Marking stale peer connection: $peerId (ICE: $iceState)');
+        stalePeers.add(peerId);
+      }
+    }
+
+    // Close stale connections
+    for (final peerId in stalePeers) {
+      debugPrint('LiveStream: Closing stale peer connection: $peerId');
+      await _closePeerConnection(peerId);
+    }
+
+    if (stalePeers.isNotEmpty) {
+      debugPrint('LiveStream: Cleaned up ${stalePeers.length} stale peer connections');
+      // Reset audio configured flag so next connection sets it up fresh
+      _audioConfigured = false;
+      _audioConfigCompleter = null;
+    }
+  }
+
+  /// Request the current speaker to resend their WebRTC offer
+  /// Call this when we've cleaned up stale connections and need to reconnect
+  void requestWebRtcReconnect() {
+    if (_currentSpeakerId == null) {
+      debugPrint('LiveStream: No current speaker to request reconnect from');
+      return;
+    }
+
+    debugPrint('LiveStream: Requesting WebRTC reconnect from speaker $_currentSpeakerId');
+    _wsService.requestWebRtcOffer(channelId, _currentSpeakerId!);
+  }
+
+  /// Get the current speaker ID
+  String? get currentSpeakerId => _currentSpeakerId;
+
+  /// Force stop all connections - used when user presses STOP button
+  /// This closes all WebRTC peer connections and stops any audio
+  Future<void> forceStopAllConnections() async {
+    debugPrint('LiveStream: Force stopping all connections');
+
+    // Stop broadcasting if we were
+    if (_isBroadcasting) {
+      _isBroadcasting = false;
+      _setLocalAudioEnabled(false);
+    }
+
+    // Close all peer connections - this stops audio immediately
+    await _closeAllPeerConnections();
+
+    // Reset state
+    _currentSpeakerId = null;
+    _audioConfigured = false;
+    _audioConfigCompleter = null;
+
+    // Update state
+    _updateState(LiveStreamingState.idle);
+    _speakerController.add((id: null, name: null));
+
+    debugPrint('LiveStream: All connections forcibly stopped');
+  }
+
+  /// Resend offers to all listeners with stale connections
+  /// Call this when broadcaster comes to foreground to reconnect any dropped listeners
+  Future<void> resendOffersToStaleListeners() async {
+    if (!_isBroadcasting || _localStream == null) {
+      debugPrint('LiveStream: Not broadcasting, no need to resend offers');
+      return;
+    }
+
+    debugPrint('LiveStream: Checking for stale listener connections...');
+
+    // Use lock to prevent race conditions
+    await _connectionLock.synchronized(() async {
+      final stalePeers = <String>[];
+
+      for (final entry in _peerConnections.entries) {
+        final peerId = entry.key;
+        final pc = entry.value;
+        final iceState = pc.iceConnectionState;
+
+        // Check if ICE is in a terminal or stale state
+        if (iceState == RTCIceConnectionState.RTCIceConnectionStateClosed ||
+            iceState == RTCIceConnectionState.RTCIceConnectionStateFailed ||
+            iceState == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+          debugPrint('LiveStream: Stale listener connection: $peerId (ICE: $iceState)');
+          stalePeers.add(peerId);
+        }
+      }
+
+      if (stalePeers.isEmpty) {
+        debugPrint('LiveStream: No stale listener connections');
+        return;
+      }
+
+      debugPrint('LiveStream: Resending offers to ${stalePeers.length} stale listeners');
+
+      // Close stale connections and resend offers
+      for (final peerId in stalePeers) {
+        debugPrint('LiveStream: Closing stale connection and resending offer to $peerId');
+        await _closePeerConnection(peerId);
+        _pendingOffersSent.remove(peerId);
+        await _createAndSendOfferToListener(peerId);
+      }
+    });
   }
 
   LiveStreamingService({
@@ -271,6 +414,41 @@ class LiveStreamingService {
           _updateState(LiveStreamingState.idle);
         }
       }
+    });
+
+    // Listen for WebRTC offer requests (from listeners who need to reconnect after ICE failure)
+    _offerRequestSubscription = _wsService.webrtcOfferRequests.listen((event) async {
+      if (event.roomId == channelId && _isBroadcasting) {
+        debugPrint('LiveStream: Received offer request from ${event.fromUserId}');
+        await _handleOfferRequest(event.fromUserId);
+      }
+    });
+  }
+
+  /// Handle a request from a listener to resend our offer
+  /// This happens when they reconnect after ICE failure
+  Future<void> _handleOfferRequest(String listenerId) async {
+    if (!_isBroadcasting || _localStream == null) {
+      debugPrint('LiveStream: Not broadcasting or no local stream, ignoring offer request');
+      return;
+    }
+
+    // Use lock to prevent race conditions
+    await _connectionLock.synchronized(() async {
+      debugPrint('LiveStream: Handling offer request from $listenerId');
+
+      // Clean up any existing stale connection for this listener
+      if (_peerConnections.containsKey(listenerId)) {
+        debugPrint('LiveStream: Closing stale connection to $listenerId first');
+        await _closePeerConnection(listenerId);
+      }
+
+      // Clear pending offers flag
+      _pendingOffersSent.remove(listenerId);
+
+      // Create and send a new offer
+      debugPrint('LiveStream: Sending new offer to $listenerId');
+      await _createAndSendOfferToListener(listenerId);
     });
   }
 
@@ -1023,6 +1201,9 @@ class LiveStreamingService {
         if (_isBroadcasting && !_connectedListeners.contains(peerId)) {
           _connectedListeners.add(peerId);
           _emitListenerCount();
+
+          // Emit listener name for toast notification
+          _emitListenerJoined(peerId);
         }
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
         debugPrint('LiveStream: ICE FAILED with $peerId! Attempting restart...');
@@ -1310,6 +1491,22 @@ class LiveStreamingService {
     });
   }
 
+  /// Emit listener name when they join (for toast notification)
+  void _emitListenerJoined(String peerId) {
+    // Look up the listener's display name from room members
+    final members = _wsService.getRoomMembers(channelId);
+    final listener = members.where((m) => m.userId == peerId).firstOrNull;
+
+    if (listener != null && listener.displayName.isNotEmpty) {
+      debugPrint('LiveStream: Listener joined: ${listener.displayName}');
+      _listenerJoinedController.add(listener.displayName);
+    } else {
+      // Fallback to a generic name if not found
+      debugPrint('LiveStream: Listener joined (unknown name): $peerId');
+      _listenerJoinedController.add('Listener');
+    }
+  }
+
   /// Close a specific peer connection
   Future<void> _closePeerConnection(String peerId) async {
     // Cancel any pending ICE disconnect timer for this peer
@@ -1438,6 +1635,8 @@ class LiveStreamingService {
     _connectionSubscription = null;
     await _memberJoinedSubscription?.cancel();
     _memberJoinedSubscription = null;
+    await _offerRequestSubscription?.cancel();
+    _offerRequestSubscription = null;
 
     // Cancel all ICE disconnect timers
     for (final timer in _iceDisconnectTimers.values) {
@@ -1497,5 +1696,6 @@ class LiveStreamingService {
     await _speakerController.close();
     await _debugController.close();
     await _listenerCountController.close();
+    await _listenerJoinedController.close();
   }
 }

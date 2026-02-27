@@ -26,6 +26,7 @@ export interface Channel {
   ownerId: string;
   imageUrl?: string;
   isPrivate: boolean;
+  isActive: boolean; // For billing - if false, PTT is disabled
   memberCount: number;
   memberIds: string[];
   audioArchiveEnabled?: boolean;
@@ -47,4 +48,48 @@ export interface DashboardStats {
   totalChannels: number;
   activeUsers: number;
   totalMessages: number;
+}
+
+// Usage statistics types
+export interface UserDailyStats {
+  userId: string;
+  userName: string;
+  date: string;
+  voicesSent: number;
+  durationSent: number; // in seconds
+  lastActivity?: Date;
+}
+
+export interface UserMonthlyStats {
+  userId: string;
+  userName: string;
+  month: string;
+  voicesSent: number;
+  durationSent: number;
+  lastActivity?: Date;
+}
+
+export interface ChannelDailyStats {
+  channelId: string;
+  date: string;
+  totalVoices: number;
+  totalDuration: number;
+  lastActivity?: Date;
+}
+
+export interface ChannelMonthlyStats {
+  channelId: string;
+  month: string;
+  totalVoices: number;
+  totalDuration: number;
+  lastActivity?: Date;
+}
+
+export interface ChannelUserStats {
+  userId: string;
+  userName: string;
+  channelId: string;
+  totalVoices: number;
+  totalDuration: number;
+  lastActivity?: Date;
 }

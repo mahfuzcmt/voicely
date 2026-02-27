@@ -1,19 +1,59 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/background_ptt_service.dart';
 import '../../../../core/services/fcm_ptt_service.dart';
 import '../../../../core/services/native_audio_service.dart';
+import '../../../../core/services/native_websocket_service.dart';
 import '../../../../di/providers.dart';
+import '../../../channels/data/channel_repository.dart';
 import '../../../messaging/data/message_repository.dart';
 import '../../data/audio_recording_service.dart';
 import '../../data/audio_storage_service.dart';
 import '../../data/live_streaming_service.dart';
 import '../../data/websocket_signaling_service.dart';
+
+/// Token cache for faster reconnection
+/// Firebase ID tokens are valid for 1 hour, so we cache with a 55-minute buffer
+class _TokenCache {
+  String? _token;
+  DateTime? _fetchedAt;
+
+  /// Get cached token if valid, otherwise fetch fresh
+  Future<String?> getToken(User user, {bool forceRefresh = false}) async {
+    // Check if we have a valid cached token (with 5-minute buffer before expiry)
+    if (!forceRefresh &&
+        _token != null &&
+        _fetchedAt != null &&
+        DateTime.now().difference(_fetchedAt!) < const Duration(minutes: 55)) {
+      debugPrint('TokenCache: Using cached token (age: ${DateTime.now().difference(_fetchedAt!).inMinutes}m)');
+      return _token;
+    }
+
+    // Fetch fresh token
+    debugPrint('TokenCache: Fetching fresh token...');
+    _token = await user.getIdToken(true);
+    _fetchedAt = DateTime.now();
+    debugPrint('TokenCache: Fresh token obtained');
+    return _token;
+  }
+
+  /// Clear the cache (e.g., on logout)
+  void clear() {
+    _token = null;
+    _fetchedAt = null;
+  }
+}
+
+/// Global token cache instance
+final _tokenCache = _TokenCache();
 
 /// Live PTT state
 enum LivePttState {
@@ -208,12 +248,19 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
   StreamSubscription? _remoteStreamSubscription;
   StreamSubscription? _debugSubscription;
   StreamSubscription? _listenerCountSubscription;
+  StreamSubscription? _listenerJoinedSubscription;
   StreamSubscription? _fcmBroadcastSubscription;
   StreamSubscription? _roomMembersSubscription;
+  StreamSubscription? _nativeWsConnectionSubscription;
+  StreamSubscription? _nativeWsMessageSubscription;
+
+  /// Callback to show toast when listener joins (set by UI)
+  void Function(String listenerName)? onListenerJoined;
   Timer? _broadcastTimer;
   Timer? _autoStopTimer;
   bool _wakelockEnabled = false;
   bool _backgroundServiceStarted = false;
+  bool _nativeServiceStarted = false;
 
   // FCM service for wake-up notifications
   final FcmPttService _fcmPttService = FcmPttService();
@@ -388,17 +435,17 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     // Force a ping to check if connection is really alive
     if (_wsService.isConnected) {
       _wsService.sendPing();
-      // Give it a moment to respond
-      await Future.delayed(const Duration(milliseconds: 500));
+      // Give it a brief moment to respond (reduced for faster detection)
+      await Future.delayed(const Duration(milliseconds: 200));
     }
 
     // Reconnect if disconnected or if ping didn't get a response
     if (!_wsService.isConnected) {
-      debugPrint('LivePTT: WebSocket disconnected, force reconnecting...');
-      // Use force reconnect to ensure clean state
+      debugPrint('LivePTT: WebSocket disconnected, force reconnecting (fast mode)...');
+      // Use force reconnect to ensure clean state (uses fast mode internally)
       await _wsService.forceReconnect();
-      // Wait for connection to establish
-      await Future.delayed(const Duration(milliseconds: 500));
+      // Wait briefly for connection to establish
+      await Future.delayed(const Duration(milliseconds: 300));
       // Join room after reconnecting
       if (_wsService.isConnected) {
         _wsService.joinRoom(channelId, rejoin: true);
@@ -407,6 +454,60 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       // Rejoin room to ensure we're still in it
       _wsService.joinRoom(channelId, rejoin: true);
     }
+
+    // CRITICAL: Check and reconnect WebRTC peer connections if they're stale
+    // This handles the case where WebSocket stayed connected (via native service)
+    // but the WebRTC ICE connections timed out while backgrounded
+    await _checkAndReconnectWebRtc();
+
+    // If we're broadcasting, check and resend offers to any stale listeners
+    if (state.isBroadcasting) {
+      debugPrint('LivePTT: Broadcaster coming to foreground, checking listener connections');
+      await _streamingService.resendOffersToStaleListeners();
+    }
+  }
+
+  /// Check if WebRTC connections are stale and request reconnection if needed
+  Future<void> _checkAndReconnectWebRtc() async {
+    // Only relevant if we're supposed to be listening to someone
+    final currentSpeakerId = _streamingService.currentSpeakerId;
+
+    if (currentSpeakerId == null) {
+      debugPrint('LivePTT: No current speaker, no WebRTC reconnect needed');
+      return;
+    }
+
+    // Skip if we're the speaker
+    if (currentSpeakerId == _wsService.userId) {
+      debugPrint('LivePTT: We are the speaker, no WebRTC reconnect needed');
+      return;
+    }
+
+    // Check if we have healthy peer connections
+    if (_streamingService.hasHealthyPeerConnections()) {
+      debugPrint('LivePTT: WebRTC connections are healthy');
+      return;
+    }
+
+    // Peer connections are stale - clean them up
+    debugPrint('LivePTT: WebRTC connections are stale, cleaning up...');
+    await _streamingService.cleanupStalePeerConnections();
+
+    // Update state to show we're reconnecting
+    state = state.copyWith(
+      iceState: 'Reconnecting...',
+    );
+
+    // Request the speaker to resend their offer
+    debugPrint('LivePTT: Requesting WebRTC reconnect from speaker $currentSpeakerId');
+    _streamingService.requestWebRtcReconnect();
+
+    // Fallback: Leave and rejoin the room to trigger member_joined on broadcaster side
+    // This works even if the server doesn't support the request_webrtc_offer message
+    debugPrint('LivePTT: Also rejoining room to trigger broadcaster offer');
+    _wsService.leaveRoom(channelId);
+    await Future.delayed(const Duration(milliseconds: 100));
+    _wsService.joinRoom(channelId, rejoin: true);
   }
 
   /// Setup listeners for state changes
@@ -414,7 +515,18 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     // Setup background service ping callback
     _backgroundService.setOnBackgroundPing(() {
       debugPrint('LivePTT: Background ping received, sending WebSocket ping');
-      _wsService.sendPing();
+      if (_wsService.isConnected) {
+        _wsService.sendPing();
+      } else {
+        debugPrint('LivePTT: Not connected, triggering reconnect from ping');
+        _backgroundReconnect();
+      }
+    });
+
+    // Setup background service reconnect callback
+    _backgroundService.setOnReconnectRequest(() async {
+      debugPrint('LivePTT: Background reconnect request received');
+      await _backgroundReconnect();
     });
 
     // Listen to WebSocket connection state
@@ -522,6 +634,13 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       state = state.copyWith(listenerCount: count);
     });
 
+    // Listen for listener joined events (for toast notifications)
+    _listenerJoinedSubscription = _streamingService.listenerJoinedStream.listen((listenerName) {
+      debugPrint('LivePTT: Listener joined notification: $listenerName');
+      // Invoke callback if set by UI
+      onListenerJoined?.call(listenerName);
+    });
+
     // Listen for room members changes - track total room members
     _roomMembersSubscription = _wsService.roomMembers.listen((event) {
       if (event.roomId != channelId) return;
@@ -552,6 +671,18 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       );
     } catch (e) {
       debugPrint('LivePTT: Background service error: $e');
+    }
+
+    // Acquire partial wake lock to keep CPU running in background
+    try {
+      await BackgroundPttService.acquirePartialWakeLock();
+    } catch (e) {
+      debugPrint('LivePTT: Failed to acquire partial wake lock: $e');
+    }
+
+    // Start native WebSocket service for persistent background connection (Android only)
+    if (Platform.isAndroid) {
+      await _startNativeWebSocketService();
     }
 
     // Enable wakelock with timeout
@@ -632,12 +763,12 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     state = state.copyWith(state: LivePttState.connecting);
 
     try {
-      // Get FRESH token (force refresh to avoid expired token issues)
-      final token = await user.getIdToken(true).timeout(
+      // Use cached token for faster connection (falls back to fresh if expired)
+      final token = await _tokenCache.getToken(user).timeout(
         _initTimeout,
         onTimeout: () => throw TimeoutException('Token fetch timed out'),
       );
-      debugPrint('LivePTT: Got fresh token, length: ${token?.length ?? 0}');
+      debugPrint('LivePTT: Got token, length: ${token?.length ?? 0}');
 
       if (token != null) {
         // Get display name with timeout
@@ -692,6 +823,31 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       return false;
     }
 
+    // Check if channel is active (billing check)
+    try {
+      final channelRepo = _ref.read(channelRepositoryProvider);
+      final channel = await channelRepo.getChannelById(channelId);
+      if (channel == null) {
+        debugPrint('LivePTT: Channel not found');
+        state = state.copyWith(
+          state: LivePttState.error,
+          errorMessage: 'Channel not found',
+        );
+        return false;
+      }
+      if (!channel.isActive) {
+        debugPrint('LivePTT: Channel is inactive (billing)');
+        state = state.copyWith(
+          state: LivePttState.error,
+          errorMessage: 'Channel is inactive. Contact administrator.',
+        );
+        return false;
+      }
+    } catch (e) {
+      debugPrint('LivePTT: Error checking channel status: $e');
+      // Allow broadcast if we can't check - don't block on network errors
+    }
+
     state = state.copyWith(state: LivePttState.requestingFloor);
 
     final success = await _streamingService.startBroadcasting();
@@ -738,6 +894,137 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     await _autoConnect();
   }
 
+  /// Start the native Android WebSocket service for persistent background connection
+  Future<void> _startNativeWebSocketService() async {
+    if (_nativeServiceStarted) return;
+
+    try {
+      final user = _ref.read(authStateProvider).value;
+      if (user == null) {
+        debugPrint('LivePTT: Cannot start native WS service - no user');
+        return;
+      }
+
+      final token = await _tokenCache.getToken(user);
+      if (token == null) {
+        debugPrint('LivePTT: Cannot start native WS service - no token');
+        return;
+      }
+
+      String? displayName = user.displayName;
+      if (displayName == null || displayName.isEmpty) {
+        try {
+          final userModel = await _ref.read(currentUserProvider.future);
+          displayName = userModel?.displayName ?? userModel?.phoneNumber;
+        } catch (e) {
+          debugPrint('LivePTT: Failed to get display name for native service: $e');
+        }
+      }
+
+      final nativeService = NativeWebSocketService.instance;
+
+      // Listen to connection state from native service
+      _nativeWsConnectionSubscription?.cancel();
+      _nativeWsConnectionSubscription = nativeService.connectionState.listen((isConnected) {
+        debugPrint('LivePTT: Native WS connection state: $isConnected');
+        // Update background service notification
+        if (isConnected) {
+          _backgroundService.notifyIdle();
+        } else {
+          _backgroundService.notifyDisconnected();
+        }
+      });
+
+      // Listen to messages from native service and forward to Flutter WebSocket handlers
+      _nativeWsMessageSubscription?.cancel();
+      _nativeWsMessageSubscription = nativeService.messages.listen((message) {
+        debugPrint('LivePTT: Native WS message: ${message['type']}');
+        // Messages are handled by the native service for notifications
+        // WebRTC signaling still goes through Flutter WebSocket when app is active
+      });
+
+      // Start the native service
+      final started = await nativeService.startService(
+        serverUrl: AppConstants.signalingServerUrl,
+        authToken: token,
+        displayName: displayName,
+        roomId: channelId,
+      );
+
+      _nativeServiceStarted = started;
+      debugPrint('LivePTT: Native WebSocket service started: $started');
+    } catch (e) {
+      debugPrint('LivePTT: Failed to start native WS service: $e');
+    }
+  }
+
+  /// Stop the native WebSocket service
+  Future<void> _stopNativeWebSocketService() async {
+    if (!_nativeServiceStarted) return;
+
+    try {
+      _nativeWsConnectionSubscription?.cancel();
+      _nativeWsConnectionSubscription = null;
+      _nativeWsMessageSubscription?.cancel();
+      _nativeWsMessageSubscription = null;
+
+      await NativeWebSocketService.instance.stopService();
+      _nativeServiceStarted = false;
+      debugPrint('LivePTT: Native WebSocket service stopped');
+    } catch (e) {
+      debugPrint('LivePTT: Failed to stop native WS service: $e');
+    }
+  }
+
+  /// Background reconnect - called from background service when connection is lost
+  /// Uses fast mode and cached token for quick reconnection
+  Future<void> _backgroundReconnect() async {
+    if (_wsService.isConnected) {
+      debugPrint('LivePTT: Background reconnect skipped - already connected');
+      return;
+    }
+
+    debugPrint('LivePTT: Background reconnect starting...');
+
+    try {
+      final user = _ref.read(authStateProvider).value;
+      if (user == null) {
+        debugPrint('LivePTT: Background reconnect failed - no user');
+        return;
+      }
+
+      // Use cached token for fast reconnection
+      final token = await _tokenCache.getToken(user);
+      if (token == null) {
+        debugPrint('LivePTT: Background reconnect failed - no token');
+        return;
+      }
+
+      // Get display name
+      String? displayName = user.displayName;
+      if (displayName == null || displayName.isEmpty) {
+        try {
+          final userModel = await _ref.read(currentUserProvider.future);
+          displayName = userModel?.displayName ?? userModel?.phoneNumber;
+        } catch (e) {
+          debugPrint('LivePTT: Background reconnect - failed to get display name: $e');
+        }
+      }
+
+      // Connect with fast mode
+      final connected = await _wsService.connect(token, displayName: displayName, fastMode: true);
+
+      if (connected) {
+        debugPrint('LivePTT: Background reconnect successful, joining room');
+        _wsService.joinRoom(channelId, rejoin: true);
+      } else {
+        debugPrint('LivePTT: Background reconnect failed');
+      }
+    } catch (e) {
+      debugPrint('LivePTT: Background reconnect error: $e');
+    }
+  }
+
   /// Toggle mute state for incoming audio
   void toggleMute() {
     final newMuteState = !state.isMuted;
@@ -747,6 +1034,29 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     _streamingService.setMuted(newMuteState);
 
     debugPrint('LivePTT: Mute toggled to $newMuteState');
+  }
+
+  /// Force stop the current broadcast - can be used by any user to stop
+  /// someone who forgot to release the floor
+  Future<void> forceStopCurrentBroadcast() async {
+    debugPrint('LivePTT: Force stopping current broadcast');
+
+    // Send release floor command to the server
+    _wsService.releaseFloor(channelId);
+
+    // CRITICAL: Close all WebRTC peer connections to stop audio
+    await _streamingService.forceStopAllConnections();
+
+    // Clear the current speaker state locally
+    state = state.copyWith(
+      currentSpeakerId: null,
+      currentSpeakerName: null,
+      floorExpiresAt: null,
+      state: LivePttState.idle,
+    );
+
+    // Update background notification
+    _backgroundService.notifyIdle();
   }
 
   /// Map connection state to PTT state
@@ -1111,17 +1421,31 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     _debugSubscription = null;
     _listenerCountSubscription?.cancel();
     _listenerCountSubscription = null;
+    _listenerJoinedSubscription?.cancel();
+    _listenerJoinedSubscription = null;
     _roomMembersSubscription?.cancel();
     _roomMembersSubscription = null;
     _fcmBroadcastSubscription?.cancel();
     _fcmBroadcastSubscription = null;
+    _nativeWsConnectionSubscription?.cancel();
+    _nativeWsConnectionSubscription = null;
+    _nativeWsMessageSubscription?.cancel();
+    _nativeWsMessageSubscription = null;
     // Clear FCM wake-up callback
     _fcmPttService.onWakeUpForBroadcast = null;
     _stopBroadcastTimer();
 
+    // Stop native WebSocket service (Android)
+    if (Platform.isAndroid) {
+      _stopNativeWebSocketService();
+    }
+
     // Stop background service and disable wakelock
     _stopBackgroundService();
     _disableWakelock();
+
+    // Release partial wake lock
+    BackgroundPttService.releasePartialWakeLock();
 
     // Leave room on dispose
     if (_wsService.isConnected) {

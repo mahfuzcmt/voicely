@@ -6,13 +6,17 @@ import {
   LayoutDashboard,
   Radio,
   Users,
-  Mic
+  Mic,
+  BarChart3,
+  Settings,
 } from 'lucide-react';
 
 const menuItems = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { name: 'Channels', href: '/dashboard/channels', icon: Radio },
   { name: 'Users', href: '/dashboard/users', icon: Users },
+  { name: 'Reports', href: '/dashboard/reports', icon: BarChart3 },
+  { name: 'Settings', href: '/dashboard/settings', icon: Settings },
 ];
 
 export default function Sidebar() {

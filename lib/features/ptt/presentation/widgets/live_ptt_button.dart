@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/services/native_audio_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
+import '../../data/websocket_signaling_service.dart';
 import '../providers/live_ptt_providers.dart';
 
 /// Enhanced PTT button for real-time streaming
@@ -26,6 +29,12 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
     with SingleTickerProviderStateMixin {
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
+  String? _lastSpeakerId;
+
+  // Batching for listener joined notifications
+  final List<String> _pendingListenerNames = [];
+  Timer? _listenerBatchTimer;
+  static const Duration _listenerBatchDelay = Duration(milliseconds: 800);
 
   @override
   void initState() {
@@ -37,10 +46,23 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
     _pulseAnimation = Tween<double>(begin: 1.0, end: 1.15).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
+
+    // Set up listener joined callback for toast notifications
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(livePttSessionProvider(widget.channelId).notifier).onListenerJoined = (listenerName) {
+        if (mounted) {
+          _queueListenerJoinedNotification(listenerName);
+        }
+      };
+    });
   }
 
   @override
   void dispose() {
+    // Clear the callback to avoid memory leaks
+    ref.read(livePttSessionProvider(widget.channelId).notifier).onListenerJoined = null;
+    _listenerBatchTimer?.cancel();
+    _pendingListenerNames.clear();
     _pulseController.dispose();
     super.dispose();
   }
@@ -110,6 +132,23 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
       _pulseController.stop();
       _pulseController.reset();
     }
+
+    // Show toast when someone starts speaking (speaker changes from null to someone)
+    // Don't show if we are the speaker
+    final wsService = ref.watch(websocketSignalingServiceProvider);
+    final currentSpeakerId = session.currentSpeakerId;
+    if (currentSpeakerId != null &&
+        currentSpeakerId != _lastSpeakerId &&
+        currentSpeakerId != wsService.userId &&
+        session.currentSpeakerName != null) {
+      // Use post-frame callback to avoid showing during build
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _showSpeakerToast(session.currentSpeakerName!);
+        }
+      });
+    }
+    _lastSpeakerId = currentSpeakerId;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -389,6 +428,7 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        // Speaker info
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           decoration: BoxDecoration(
@@ -430,6 +470,128 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
         const SizedBox(height: 8),
         _AudioDebugInfo(channelId: widget.channelId),
       ],
+    );
+  }
+
+  /// Force stop the current broadcast - can be used by any user
+  Future<void> _forceStopBroadcast() async {
+    await ref.read(livePttSessionProvider(widget.channelId).notifier).forceStopCurrentBroadcast();
+    if (mounted) {
+      context.showSnackBar('Broadcast stopped');
+    }
+  }
+
+  /// Show a bubble toast when someone starts speaking
+  void _showSpeakerToast(String speakerName) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.volume_up,
+              color: Colors.white,
+              size: 20,
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                '$speakerName is speaking',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: Colors.green,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(24),
+        ),
+        margin: EdgeInsets.only(
+          bottom: MediaQuery.of(context).size.height * 0.1,
+          left: 20,
+          right: 20,
+        ),
+        duration: const Duration(seconds: 3),
+        dismissDirection: DismissDirection.horizontal,
+      ),
+    );
+  }
+
+  /// Queue a listener joined notification for batching
+  /// This collects multiple listeners who join in quick succession
+  /// and shows them together in a single notification
+  void _queueListenerJoinedNotification(String listenerName) {
+    // Add to pending list
+    if (!_pendingListenerNames.contains(listenerName)) {
+      _pendingListenerNames.add(listenerName);
+    }
+
+    // Reset or start the batch timer
+    _listenerBatchTimer?.cancel();
+    _listenerBatchTimer = Timer(_listenerBatchDelay, () {
+      if (mounted && _pendingListenerNames.isNotEmpty) {
+        _showBatchedListenerToast();
+      }
+    });
+  }
+
+  /// Show a batched toast with all pending listener names
+  void _showBatchedListenerToast() {
+    if (_pendingListenerNames.isEmpty) return;
+
+    // Create the message based on count
+    String message;
+    if (_pendingListenerNames.length == 1) {
+      message = '${_pendingListenerNames.first} joined';
+    } else if (_pendingListenerNames.length == 2) {
+      message = '${_pendingListenerNames[0]} & ${_pendingListenerNames[1]} joined';
+    } else {
+      // Show first two names + count of others
+      final othersCount = _pendingListenerNames.length - 2;
+      message = '${_pendingListenerNames[0]}, ${_pendingListenerNames[1]} +$othersCount joined';
+    }
+
+    // Clear the pending list
+    _pendingListenerNames.clear();
+
+    // Show the notification
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.headphones,
+              color: Colors.white,
+              size: 20,
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                message,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: Colors.blue,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(24),
+        ),
+        margin: EdgeInsets.only(
+          bottom: MediaQuery.of(context).size.height * 0.15,
+          left: 20,
+          right: 20,
+        ),
+        duration: const Duration(seconds: 2),
+        dismissDirection: DismissDirection.horizontal,
+      ),
     );
   }
 

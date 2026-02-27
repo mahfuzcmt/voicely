@@ -60,7 +60,7 @@ export async function PUT(
 
     const { id } = await params;
     const body = await request.json();
-    const { name, description, isPrivate } = body;
+    const { name, description, isPrivate, isActive } = body;
 
     const channelRef = doc(db, 'channels', id);
     const channelDoc = await getDoc(channelRef);
@@ -76,6 +76,7 @@ export async function PUT(
     if (name !== undefined) updateData.name = name.trim();
     if (description !== undefined) updateData.description = description?.trim() || null;
     if (isPrivate !== undefined) updateData.isPrivate = isPrivate;
+    if (isActive !== undefined) updateData.isActive = isActive;
 
     await updateDoc(channelRef, updateData);
 

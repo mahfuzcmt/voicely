@@ -64,6 +64,7 @@ export async function POST(request: NextRequest) {
       description: description?.trim() || null,
       ownerId: admin.adminId,
       isPrivate,
+      isActive: true, // Default to active for billing
       audioArchiveEnabled: true,
       memberCount: 0,
       memberIds: [],
@@ -86,6 +87,7 @@ export async function POST(request: NextRequest) {
         name: name.trim(),
         description: description?.trim() || null,
         isPrivate,
+        isActive: true,
         audioArchiveEnabled: true,
         memberCount: 0,
         memberIds: [],
