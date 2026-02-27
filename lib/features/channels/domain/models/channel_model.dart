@@ -15,6 +15,7 @@ sealed class ChannelModel with _$ChannelModel {
     required String ownerId,
     String? imageUrl,
     @Default(false) bool isPrivate,
+    @Default(true) bool isActive, // For billing - if false, no PTT allowed
     @Default(0) int memberCount,
     @Default([]) List<String> memberIds,
     DateTime? createdAt,
@@ -33,6 +34,7 @@ sealed class ChannelModel with _$ChannelModel {
       ownerId: data['ownerId'] ?? '',
       imageUrl: data['imageUrl'],
       isPrivate: data['isPrivate'] ?? false,
+      isActive: data['isActive'] ?? true, // Default to active for existing channels
       memberCount: data['memberCount'] ?? 0,
       memberIds: List<String>.from(data['memberIds'] ?? []),
       createdAt: (data['createdAt'] as Timestamp?)?.toDate(),
@@ -47,6 +49,7 @@ sealed class ChannelModel with _$ChannelModel {
       'ownerId': ownerId,
       'imageUrl': imageUrl,
       'isPrivate': isPrivate,
+      'isActive': isActive,
       'memberCount': memberCount,
       'memberIds': memberIds,
       'createdAt': createdAt != null

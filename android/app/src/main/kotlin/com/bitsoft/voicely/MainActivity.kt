@@ -23,14 +23,138 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.bitsoft.voicely/audio"
+    private val WAKELOCK_CHANNEL = "com.voicely.app/wakelock"
+    private val WEBSOCKET_CHANNEL = "com.voicely.app/websocket"
 
     // Hardware noise suppressor (zero latency)
     private var noiseSuppressor: NoiseSuppressor? = null
     private var echoCanceler: AcousticEchoCanceler? = null
 
+    // Partial wake lock for keeping CPU awake during background operation
+    private var partialWakeLock: PowerManager.WakeLock? = null
+
+    // Event channel for WebSocket messages
+    private var webSocketEventSink: io.flutter.plugin.common.EventChannel.EventSink? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
+        // WebSocket service method channel
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WEBSOCKET_CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "startService" -> {
+                    val serverUrl = call.argument<String>("serverUrl")
+                    val authToken = call.argument<String>("authToken")
+                    val displayName = call.argument<String>("displayName")
+                    val roomId = call.argument<String>("roomId")
+
+                    if (serverUrl != null && authToken != null) {
+                        WebSocketService.startService(this, serverUrl, authToken, displayName, roomId)
+                        result.success(true)
+                    } else {
+                        result.error("INVALID_ARGS", "serverUrl and authToken required", null)
+                    }
+                }
+                "stopService" -> {
+                    WebSocketService.stopService(this)
+                    result.success(true)
+                }
+                "isRunning" -> {
+                    result.success(WebSocketService.isServiceRunning())
+                }
+                "updateCredentials" -> {
+                    val authToken = call.argument<String>("authToken")
+                    val displayName = call.argument<String>("displayName")
+                    if (authToken != null) {
+                        WebSocketService.updateCredentials(authToken, displayName)
+                        result.success(true)
+                    } else {
+                        result.error("INVALID_ARGS", "authToken required", null)
+                    }
+                }
+                "joinRoom" -> {
+                    val roomId = call.argument<String>("roomId")
+                    if (roomId != null) {
+                        WebSocketService.joinRoom(roomId)
+                        result.success(true)
+                    } else {
+                        result.error("INVALID_ARGS", "roomId required", null)
+                    }
+                }
+                "leaveRoom" -> {
+                    val roomId = call.argument<String>("roomId")
+                    if (roomId != null) {
+                        WebSocketService.leaveRoom(roomId)
+                        result.success(true)
+                    } else {
+                        result.error("INVALID_ARGS", "roomId required", null)
+                    }
+                }
+                "sendMessage" -> {
+                    val message = call.argument<String>("message")
+                    if (message != null) {
+                        val sent = WebSocketService.sendMessage(message)
+                        result.success(sent)
+                    } else {
+                        result.error("INVALID_ARGS", "message required", null)
+                    }
+                }
+                else -> {
+                    result.notImplemented()
+                }
+            }
+        }
+
+        // WebSocket event channel for receiving messages
+        io.flutter.plugin.common.EventChannel(flutterEngine.dartExecutor.binaryMessenger, "$WEBSOCKET_CHANNEL/events")
+            .setStreamHandler(object : io.flutter.plugin.common.EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: io.flutter.plugin.common.EventChannel.EventSink?) {
+                    webSocketEventSink = events
+
+                    // Set up callbacks from WebSocketService
+                    WebSocketService.onConnectionStateChanged = { isConnected ->
+                        runOnUiThread {
+                            events?.success(mapOf(
+                                "type" to "connectionState",
+                                "isConnected" to isConnected
+                            ))
+                        }
+                    }
+
+                    WebSocketService.onMessageReceived = { message ->
+                        runOnUiThread {
+                            events?.success(mapOf(
+                                "type" to "message",
+                                "data" to message
+                            ))
+                        }
+                    }
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    webSocketEventSink = null
+                    WebSocketService.onConnectionStateChanged = null
+                    WebSocketService.onMessageReceived = null
+                }
+            })
+
+        // Wake lock method channel
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WAKELOCK_CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "acquirePartialWakeLock" -> {
+                    result.success(acquirePartialWakeLock())
+                }
+                "releasePartialWakeLock" -> {
+                    releasePartialWakeLock()
+                    result.success(true)
+                }
+                else -> {
+                    result.notImplemented()
+                }
+            }
+        }
+
+        // Audio method channel
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "setSpeakerOn" -> {
@@ -734,5 +858,57 @@ class MainActivity : FlutterActivity() {
         }
 
         android.util.Log.d("VoicelyAudio", "Audio mode set to NORMAL with speaker enabled")
+    }
+
+    /**
+     * Acquire a partial wake lock to keep the CPU running even when screen is off.
+     * This is critical for maintaining WebSocket connections in background.
+     * Uses PARTIAL_WAKE_LOCK which only keeps CPU running, not screen.
+     */
+    private fun acquirePartialWakeLock(): Boolean {
+        return try {
+            if (partialWakeLock?.isHeld == true) {
+                android.util.Log.d("VoicelyWakeLock", "Partial wake lock already held")
+                return true
+            }
+
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            partialWakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "Voicely::PTTWakeLock"
+            ).apply {
+                // Acquire with timeout (30 minutes) to prevent battery drain if app crashes
+                acquire(30 * 60 * 1000L) // 30 minutes
+            }
+
+            android.util.Log.d("VoicelyWakeLock", "Partial wake lock acquired")
+            true
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyWakeLock", "Failed to acquire partial wake lock", e)
+            false
+        }
+    }
+
+    /**
+     * Release the partial wake lock
+     */
+    private fun releasePartialWakeLock() {
+        try {
+            if (partialWakeLock?.isHeld == true) {
+                partialWakeLock?.release()
+                android.util.Log.d("VoicelyWakeLock", "Partial wake lock released")
+            }
+            partialWakeLock = null
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyWakeLock", "Error releasing partial wake lock", e)
+        }
+    }
+
+    override fun onDestroy() {
+        // Clean up wake lock
+        releasePartialWakeLock()
+        // Clean up noise suppression
+        disableNoiseSuppression()
+        super.onDestroy()
     }
 }

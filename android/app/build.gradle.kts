@@ -46,4 +46,6 @@ flutter {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+    // OkHttp for native WebSocket connection (keeps alive when app is backgrounded)
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

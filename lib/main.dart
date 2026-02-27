@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
@@ -11,7 +12,11 @@ import 'core/router/app_router.dart';
 import 'core/services/background_audio_service.dart';
 import 'core/services/fcm_ptt_service.dart';
 import 'core/theme/app_theme.dart';
+import 'features/ptt/data/websocket_signaling_service.dart';
 import 'firebase_options.dart';
+
+/// Global provider container for accessing services from notification handlers
+ProviderContainer? _globalContainer;
 
 /// Global navigator key for navigation from notification taps
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
@@ -58,7 +63,16 @@ Future<void> main() async {
     ),
   );
 
-  runApp(const ProviderScope(child: VoicelyApp()));
+  // Create a provider container that we can reference globally for notification handlers
+  final container = ProviderContainer();
+  _globalContainer = container;
+
+  runApp(
+    UncontrolledProviderScope(
+      container: container,
+      child: const VoicelyApp(),
+    ),
+  );
 }
 
 /// Initialize local notifications for showing alerts
@@ -105,8 +119,54 @@ void _onNotificationTapped(NotificationResponse response) {
   if (channelId != null && channelId.isNotEmpty) {
     // Store the channel ID to navigate after app is ready
     _pendingChannelId = channelId;
+
+    // Pre-connect WebSocket immediately (runs in parallel with UI transition)
+    _preConnectWebSocket();
+
     // Also emit to stream for apps that are already running
     _notificationTapController.add(channelId);
+  }
+}
+
+/// Pre-connect WebSocket when notification is tapped for faster reconnection
+Future<void> _preConnectWebSocket() async {
+  debugPrint('Pre-connecting WebSocket from notification tap...');
+
+  try {
+    final container = _globalContainer;
+    if (container == null) {
+      debugPrint('Pre-connect: Container not available yet');
+      return;
+    }
+
+    final wsService = container.read(websocketSignalingServiceProvider);
+
+    // If already connected, just return
+    if (wsService.isConnected) {
+      debugPrint('Pre-connect: Already connected');
+      return;
+    }
+
+    // Get current user and token
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      debugPrint('Pre-connect: No user logged in');
+      return;
+    }
+
+    // Use cached token if available (faster), otherwise get fresh
+    final token = await user.getIdToken();
+    if (token == null) {
+      debugPrint('Pre-connect: Failed to get token');
+      return;
+    }
+
+    // Connect with fast mode for quick reconnection
+    debugPrint('Pre-connect: Starting fast WebSocket connection...');
+    await wsService.connect(token, displayName: user.displayName, fastMode: true);
+    debugPrint('Pre-connect: WebSocket connection initiated');
+  } catch (e) {
+    debugPrint('Pre-connect: Error: $e');
   }
 }
 
@@ -174,6 +234,9 @@ class _VoicelyAppState extends ConsumerState<VoicelyApp> {
       if (channelId != null && channelId.isNotEmpty) {
         _pendingChannelId = channelId;
         debugPrint('FCM: Stored pending channelId: $channelId');
+
+        // Pre-connect WebSocket immediately for faster connection
+        _preConnectWebSocket();
       }
     }
   }
@@ -213,6 +276,9 @@ class _VoicelyAppState extends ConsumerState<VoicelyApp> {
       if (channelId != null && channelId.isNotEmpty) {
         _pendingChannelId = channelId;
         debugPrint('FCM: Stored pending channelId from background: $channelId');
+
+        // Pre-connect WebSocket immediately for faster reconnection
+        _preConnectWebSocket();
       }
 
       // Handle through PTT service

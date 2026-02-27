@@ -53,6 +53,7 @@ enum WSMessageType {
   webrtcAnswer,
   webrtcIce,
   webrtcIceBatch,
+  requestWebrtcOffer,
 
   // Errors
   error,
@@ -109,6 +110,8 @@ String _messageTypeToString(WSMessageType type) {
       return 'webrtc_ice';
     case WSMessageType.webrtcIceBatch:
       return 'webrtc_ice_batch';
+    case WSMessageType.requestWebrtcOffer:
+      return 'request_webrtc_offer';
     case WSMessageType.error:
       return 'error';
   }
@@ -165,6 +168,8 @@ WSMessageType? _parseMessageType(String type) {
       return WSMessageType.webrtcIce;
     case 'webrtc_ice_batch':
       return WSMessageType.webrtcIceBatch;
+    case 'request_webrtc_offer':
+      return WSMessageType.requestWebrtcOffer;
     case 'error':
       return WSMessageType.error;
     default:
@@ -268,7 +273,8 @@ class WebSocketSignalingService {
 
   int _reconnectAttempts = 0;
   static const int _maxReconnectAttempts = 5;
-  static const Duration _heartbeatInterval = Duration(seconds: 15);
+  /// Heartbeat interval reduced to 10 seconds for better background keep-alive
+  static const Duration _heartbeatInterval = Duration(seconds: 10);
   static const Duration _initialReconnectDelay = Duration(seconds: 1);
   static const int _maxMissedPongs = 3;
 
@@ -297,6 +303,7 @@ class WebSocketSignalingService {
   final _webrtcAnswerController = StreamController<({String roomId, String fromUserId, String sdp})>.broadcast();
   final _webrtcIceController = StreamController<({String roomId, String fromUserId, String candidate, String sdpMid, int sdpMLineIndex})>.broadcast();
   final _floorDeniedController = StreamController<({String roomId, String? reason})>.broadcast();
+  final _requestWebrtcOfferController = StreamController<({String roomId, String fromUserId})>.broadcast();
 
   // Streams
   Stream<WSConnectionState> get connectionState => _connectionStateController.stream;
@@ -307,6 +314,7 @@ class WebSocketSignalingService {
   Stream<({String roomId, String fromUserId, String sdp})> get webrtcOffers => _webrtcOfferController.stream;
   Stream<({String roomId, String fromUserId, String sdp})> get webrtcAnswers => _webrtcAnswerController.stream;
   Stream<({String roomId, String fromUserId, String candidate, String sdpMid, int sdpMLineIndex})> get webrtcIceCandidates => _webrtcIceController.stream;
+  Stream<({String roomId, String fromUserId})> get webrtcOfferRequests => _requestWebrtcOfferController.stream;
 
   // Getters
   WSConnectionState get currentConnectionState => _connectionState;
@@ -319,13 +327,18 @@ class WebSocketSignalingService {
     return List.unmodifiable(_roomMembers[roomId] ?? []);
   }
 
-  /// Connection timeout duration (reduced for faster connection)
+  /// Connection timeout duration
   static const Duration _connectionTimeout = Duration(seconds: 8);
   static const Duration _authTimeout = Duration(seconds: 5);
 
+  /// Fast connection timeouts for reconnection scenarios (notification tap, foreground resume)
+  static const Duration _fastConnectionTimeout = Duration(seconds: 3);
+  static const Duration _fastAuthTimeout = Duration(seconds: 2);
+
   /// Connect to the signaling server
-  Future<bool> connect(String authToken, {String? displayName}) async {
-    debugPrint('WS: connect() called with displayName: $displayName');
+  /// Set [fastMode] to true for faster timeouts (e.g., notification tap, foreground resume)
+  Future<bool> connect(String authToken, {String? displayName, bool fastMode = false}) async {
+    debugPrint('WS: connect() called with displayName: $displayName, fastMode: $fastMode');
 
     // Prevent concurrent connection attempts
     if (_isConnecting) {
@@ -354,16 +367,20 @@ class WebSocketSignalingService {
     final serverUrl = AppConstants.signalingServerUrl;
     debugPrint('WS: Connecting to $serverUrl');
 
+    // Use faster timeouts in fastMode (notification tap, foreground resume)
+    final connectTimeout = fastMode ? _fastConnectionTimeout : _connectionTimeout;
+    final authTimeout = fastMode ? _fastAuthTimeout : _authTimeout;
+
     try {
       final uri = Uri.parse(serverUrl);
       _channel = WebSocketChannel.connect(uri);
 
-      debugPrint('WS: Waiting for ready (timeout: ${_connectionTimeout.inSeconds}s)...');
+      debugPrint('WS: Waiting for ready (timeout: ${connectTimeout.inSeconds}s)...');
       // Wait for connection with timeout
       await _channel!.ready.timeout(
-        _connectionTimeout,
+        connectTimeout,
         onTimeout: () {
-          throw TimeoutException('WebSocket connection timed out', _connectionTimeout);
+          throw TimeoutException('WebSocket connection timed out', connectTimeout);
         },
       );
 
@@ -394,12 +411,12 @@ class WebSocketSignalingService {
       _send(authPayload);
 
       // Wait for auth result with timeout
-      debugPrint('WS: Waiting for auth (timeout: ${_authTimeout.inSeconds}s)...');
+      debugPrint('WS: Waiting for auth (timeout: ${authTimeout.inSeconds}s)...');
       final authResult = await _authCompleter!.future.timeout(
-        _authTimeout,
+        authTimeout,
         onTimeout: () {
           debugPrint('WS: Auth timed out');
-          throw TimeoutException('Authentication timed out', _authTimeout);
+          throw TimeoutException('Authentication timed out', authTimeout);
         },
       );
 
@@ -570,6 +587,22 @@ class WebSocketSignalingService {
       'roomId': roomId,
       'candidates': candidates,
       if (targetUserId != null) 'targetUserId': targetUserId,
+    });
+  }
+
+  /// Request WebRTC offer from a specific user (e.g., when reconnecting after ICE failure)
+  /// This sends a message to the speaker asking them to resend their offer
+  void requestWebRtcOffer(String roomId, String speakerId) {
+    if (!isConnected) {
+      debugPrint('WS: Cannot request WebRTC offer - not connected');
+      return;
+    }
+
+    debugPrint('WS: Requesting WebRTC offer from $speakerId in room $roomId');
+    _send({
+      'type': 'request_webrtc_offer',
+      'roomId': roomId,
+      'targetUserId': speakerId,
     });
   }
 
@@ -767,6 +800,14 @@ class WebSocketSignalingService {
               sdpMLineIndex: candidate['sdpMLineIndex'] as int,
             ));
           }
+          break;
+
+        case WSMessageType.requestWebrtcOffer:
+          // A listener is requesting us to resend our offer (they reconnected after ICE failure)
+          _requestWebrtcOfferController.add((
+            roomId: json['roomId'] as String,
+            fromUserId: json['fromUserId'] as String,
+          ));
           break;
 
         case WSMessageType.error:
@@ -981,9 +1022,10 @@ class WebSocketSignalingService {
     }
   }
 
-  /// Force reconnect - used when app comes to foreground
+  /// Force reconnect - used when app comes to foreground or notification tap
+  /// Uses fast mode for quicker reconnection
   Future<void> forceReconnect() async {
-    debugPrint('WS: Force reconnect requested');
+    debugPrint('WS: Force reconnect requested (fast mode)');
 
     // Cancel any pending reconnect timer
     _reconnectTimer?.cancel();
@@ -1007,9 +1049,9 @@ class WebSocketSignalingService {
     // Update state
     _updateState(WSConnectionState.disconnected);
 
-    // Reconnect if we have credentials
+    // Reconnect if we have credentials - use fast mode for quick reconnection
     if (_authToken != null) {
-      await connect(_authToken!, displayName: _displayName);
+      await connect(_authToken!, displayName: _displayName, fastMode: true);
     }
   }
 
@@ -1054,5 +1096,6 @@ class WebSocketSignalingService {
     await _webrtcOfferController.close();
     await _webrtcAnswerController.close();
     await _webrtcIceController.close();
+    await _requestWebrtcOfferController.close();
   }
 }

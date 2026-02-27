@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -16,15 +17,48 @@ class BackgroundPttService {
   static const String _notificationChannelName = 'Voicely PTT';
   static const int _notificationId = 888;
 
+  /// Method channel for native wake lock
+  static const _channel = MethodChannel('com.voicely.app/wakelock');
+
   final FlutterBackgroundService _service = FlutterBackgroundService();
   bool _isInitialized = false;
 
   // Callback for WebSocket ping from background service
   Function()? _onBackgroundPing;
 
+  // Callback for reconnection request from background service
+  Future<void> Function()? _onReconnectRequest;
+
   /// Set callback for background ping (called from main isolate)
   void setOnBackgroundPing(Function() callback) {
     _onBackgroundPing = callback;
+  }
+
+  /// Set callback for reconnection request (called when connection is lost)
+  void setOnReconnectRequest(Future<void> Function() callback) {
+    _onReconnectRequest = callback;
+  }
+
+  /// Acquire a partial wake lock to keep CPU running
+  static Future<bool> acquirePartialWakeLock() async {
+    try {
+      final result = await _channel.invokeMethod<bool>('acquirePartialWakeLock');
+      debugPrint('BackgroundPttService: Partial wake lock acquired: $result');
+      return result ?? false;
+    } catch (e) {
+      debugPrint('BackgroundPttService: Failed to acquire partial wake lock: $e');
+      return false;
+    }
+  }
+
+  /// Release the partial wake lock
+  static Future<void> releasePartialWakeLock() async {
+    try {
+      await _channel.invokeMethod('releasePartialWakeLock');
+      debugPrint('BackgroundPttService: Partial wake lock released');
+    } catch (e) {
+      debugPrint('BackgroundPttService: Failed to release partial wake lock: $e');
+    }
   }
 
   /// Initialize the background service
@@ -75,6 +109,12 @@ class BackgroundPttService {
     _service.on('pingWebSocket').listen((event) {
       debugPrint('BackgroundPttService: Received ping request from background');
       _onBackgroundPing?.call();
+    });
+
+    // Listen for reconnect requests from background service
+    _service.on('reconnectWebSocket').listen((event) {
+      debugPrint('BackgroundPttService: Received reconnect request from background');
+      _onReconnectRequest?.call();
     });
 
     // Listen for connection status updates to sync with background
@@ -174,8 +214,10 @@ void _onStart(ServiceInstance service) async {
   // Enable wakelock to prevent CPU from sleeping
   await WakelockPlus.enable();
 
-  // Track connection status
+  // Track connection status and disconnection time
   bool isConnected = false;
+  DateTime? lastConnectedTime;
+  int consecutiveDisconnects = 0;
 
   if (service is AndroidServiceInstance) {
     service.on('setAsForeground').listen((event) {
@@ -203,8 +245,17 @@ void _onStart(ServiceInstance service) async {
   // Handle connection status updates from main isolate
   service.on('connectionStatus').listen((event) {
     if (event != null) {
+      final wasConnected = isConnected;
       isConnected = event['connected'] as bool? ?? false;
       debugPrint('BackgroundPttService: Connection status updated: $isConnected');
+
+      if (isConnected) {
+        lastConnectedTime = DateTime.now();
+        consecutiveDisconnects = 0;
+      } else if (wasConnected && !isConnected) {
+        consecutiveDisconnects++;
+        debugPrint('BackgroundPttService: Disconnect detected (count: $consecutiveDisconnects)');
+      }
     }
   });
 
@@ -215,31 +266,36 @@ void _onStart(ServiceInstance service) async {
     debugPrint('BackgroundPttService: Service stopped');
   });
 
-  // Heartbeat timer - ping WebSocket every 8 seconds to keep connection alive
+  // Primary heartbeat timer - ping WebSocket every 5 seconds (reduced from 8)
   // More frequent pings help maintain connection in background
-  // This runs even when the main isolate is suspended
-  Timer.periodic(const Duration(seconds: 8), (timer) async {
+  Timer.periodic(const Duration(seconds: 5), (timer) async {
     if (service is AndroidServiceInstance) {
       if (await service.isForegroundService()) {
-        debugPrint('BackgroundPttService: Heartbeat - sending ping to main isolate');
+        debugPrint('BackgroundPttService: Heartbeat - sending ping to main isolate (connected: $isConnected)');
 
         // Request main isolate to ping WebSocket
-        // This wakes up the main isolate briefly to send the ping
         service.invoke('pingWebSocket');
 
-        // If we detect the connection is lost, update notification
+        // If disconnected for more than 10 seconds, request reconnection
         if (!isConnected) {
           await service.setForegroundNotificationInfo(
             title: 'Voicely PTT',
             content: 'Reconnecting...',
           );
+
+          // Request reconnection after 2 failed pings (10 seconds)
+          if (consecutiveDisconnects >= 2) {
+            debugPrint('BackgroundPttService: Requesting reconnection');
+            service.invoke('reconnectWebSocket');
+            consecutiveDisconnects = 0; // Reset to avoid spam
+          }
         }
       }
     }
   });
 
-  // Secondary keepalive - ensure wakelock stays enabled
-  Timer.periodic(const Duration(seconds: 30), (timer) async {
+  // Secondary keepalive - ensure wakelock stays enabled (every 15 seconds)
+  Timer.periodic(const Duration(seconds: 15), (timer) async {
     try {
       final isEnabled = await WakelockPlus.enabled;
       if (!isEnabled) {

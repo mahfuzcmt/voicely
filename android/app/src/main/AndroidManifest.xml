@@ -109,6 +109,25 @@
             android:foregroundServiceType="microphone|mediaPlayback|dataSync"
             android:exported="false"
             tools:replace="android:exported" />
+
+        <!-- Native WebSocket service for persistent connection -->
+        <service
+            android:name=".WebSocketService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false"
+            android:stopWithTask="false" />
+
+        <!-- Boot receiver to restart WebSocket service after device reboot -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="false"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
     </application>
 
     <queries>
