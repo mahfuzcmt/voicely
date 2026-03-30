@@ -1,16 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
-import {
-  collection,
-  getDocs,
-  addDoc,
-  serverTimestamp,
-  orderBy,
-  query,
-  where,
-  doc,
-  updateDoc,
-} from 'firebase/firestore';
+import { getAdminFirestore } from '@/lib/firebase-admin';
+import { FieldValue } from 'firebase-admin/firestore';
 import { getAdminFromToken, hashPassword } from '@/lib/auth';
 import { requireSuperAdmin } from '@/lib/authorization';
 
@@ -25,9 +15,8 @@ export async function GET() {
     const denied = requireSuperAdmin(admin);
     if (denied) return denied;
 
-    const orgsRef = collection(db, 'organizations');
-    const q = query(orgsRef, orderBy('createdAt', 'desc'));
-    const snapshot = await getDocs(q);
+    const db = getAdminFirestore();
+    const snapshot = await db.collection('organizations').orderBy('createdAt', 'desc').get();
 
     const organizations = [];
 
@@ -35,21 +24,17 @@ export async function GET() {
       const orgData = orgDoc.data();
 
       // Get current user and channel counts
-      const usersQuery = query(collection(db, 'users'), where('organizationId', '==', orgDoc.id));
-      const channelsQuery = query(collection(db, 'channels'), where('organizationId', '==', orgDoc.id));
-
       const [usersSnap, channelsSnap] = await Promise.all([
-        getDocs(usersQuery),
-        getDocs(channelsQuery),
+        db.collection('users').where('organizationId', '==', orgDoc.id).get(),
+        db.collection('channels').where('organizationId', '==', orgDoc.id).get(),
       ]);
 
       // Get org admin info
       let orgAdminEmail = '';
       if (orgData.orgAdminId) {
-        const adminsQuery = query(collection(db, 'admins'), where('__name__', '==', orgData.orgAdminId));
-        const adminSnap = await getDocs(adminsQuery);
-        if (!adminSnap.empty) {
-          orgAdminEmail = adminSnap.docs[0].data().email;
+        const adminDoc = await db.collection('admins').doc(orgData.orgAdminId).get();
+        if (adminDoc.exists) {
+          orgAdminEmail = adminDoc.data()?.email || '';
         }
       }
 
@@ -114,39 +99,38 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const db = getAdminFirestore();
+
     // Check if org admin email already exists
-    const existingAdmin = query(collection(db, 'admins'), where('email', '==', orgAdminEmail.toLowerCase()));
-    const existingSnap = await getDocs(existingAdmin);
+    const existingSnap = await db.collection('admins').where('email', '==', orgAdminEmail.toLowerCase()).get();
     if (!existingSnap.empty) {
       return NextResponse.json({ error: 'An admin with this email already exists' }, { status: 400 });
     }
 
     // Create organization
-    const orgsRef = collection(db, 'organizations');
-    const orgDocRef = await addDoc(orgsRef, {
+    const orgDocRef = await db.collection('organizations').add({
       name: name.trim(),
       packageMaxUsers: Number(packageMaxUsers),
       packageMaxChannels: Number(packageMaxChannels),
       orgAdminId: '', // will update after creating admin
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     });
 
     // Create org admin
     const passwordHash = await hashPassword(orgAdminPassword);
-    const adminsRef = collection(db, 'admins');
-    const adminDocRef = await addDoc(adminsRef, {
+    const adminDocRef = await db.collection('admins').add({
       email: orgAdminEmail.toLowerCase().trim(),
       displayName: orgAdminDisplayName.trim(),
       passwordHash,
       role: 'org_admin',
       organizationId: orgDocRef.id,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     });
 
     // Update org with admin ID
-    await updateDoc(doc(db, 'organizations', orgDocRef.id), {
+    await db.collection('organizations').doc(orgDocRef.id).update({
       orgAdminId: adminDocRef.id,
     });
 

@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
-import { collection, getDocs, getDoc, doc, query, where } from 'firebase/firestore';
+import { getAdminFirestore } from '@/lib/firebase-admin';
 import { JwtPayload } from '@/lib/auth';
 
 export function isSuperAdmin(admin: JwtPayload): boolean {
@@ -37,18 +36,18 @@ export async function checkPackageLimit(
   organizationId: string,
   type: 'users' | 'channels'
 ): Promise<{ allowed: boolean; current: number; max: number }> {
-  const orgDoc = await getDoc(doc(db, 'organizations', organizationId));
+  const db = getAdminFirestore();
+  const orgDoc = await db.collection('organizations').doc(organizationId).get();
 
-  if (!orgDoc.exists()) {
+  if (!orgDoc.exists) {
     return { allowed: false, current: 0, max: 0 };
   }
 
-  const orgData = orgDoc.data();
+  const orgData = orgDoc.data()!;
   const max = type === 'users' ? orgData.packageMaxUsers : orgData.packageMaxChannels;
 
-  const collectionRef = collection(db, type === 'users' ? 'users' : 'channels');
-  const q = query(collectionRef, where('organizationId', '==', organizationId));
-  const snapshot = await getDocs(q);
+  const collectionName = type === 'users' ? 'users' : 'channels';
+  const snapshot = await db.collection(collectionName).where('organizationId', '==', organizationId).get();
   const current = snapshot.size;
 
   return { allowed: current < max, current, max };
@@ -57,18 +56,16 @@ export async function checkPackageLimit(
 export async function getOrgLimits(
   organizationId: string
 ): Promise<{ currentUsers: number; maxUsers: number; currentChannels: number; maxChannels: number } | null> {
-  const orgDoc = await getDoc(doc(db, 'organizations', organizationId));
+  const db = getAdminFirestore();
+  const orgDoc = await db.collection('organizations').doc(organizationId).get();
 
-  if (!orgDoc.exists()) return null;
+  if (!orgDoc.exists) return null;
 
-  const orgData = orgDoc.data();
-
-  const usersQuery = query(collection(db, 'users'), where('organizationId', '==', organizationId));
-  const channelsQuery = query(collection(db, 'channels'), where('organizationId', '==', organizationId));
+  const orgData = orgDoc.data()!;
 
   const [usersSnap, channelsSnap] = await Promise.all([
-    getDocs(usersQuery),
-    getDocs(channelsQuery),
+    db.collection('users').where('organizationId', '==', organizationId).get(),
+    db.collection('channels').where('organizationId', '==', organizationId).get(),
   ]);
 
   return {

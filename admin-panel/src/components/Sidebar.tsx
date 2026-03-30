@@ -20,15 +20,21 @@ interface SidebarProps {
 export default function Sidebar({ admin }: SidebarProps) {
   const pathname = usePathname();
 
+  const isSuperAdmin = admin.role === 'super_admin';
+
   const menuItems = [
     { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    ...(admin.role === 'super_admin'
+    ...(isSuperAdmin
       ? [{ name: 'Organizations', href: '/dashboard/organizations', icon: Building2 }]
       : []),
     { name: 'Channels', href: '/dashboard/channels', icon: Radio },
     { name: 'Users', href: '/dashboard/users', icon: Users },
-    { name: 'Reports', href: '/dashboard/reports', icon: BarChart3 },
-    { name: 'Settings', href: '/dashboard/settings', icon: Settings },
+    ...(isSuperAdmin
+      ? [
+          { name: 'Reports', href: '/dashboard/reports', icon: BarChart3 },
+          { name: 'Settings', href: '/dashboard/settings', icon: Settings },
+        ]
+      : []),
   ];
 
   return (

@@ -1,19 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
-import {
-  doc,
-  getDoc,
-  updateDoc,
-  deleteDoc,
-  serverTimestamp,
-  collection,
-  getDocs,
-  query,
-  where,
-} from 'firebase/firestore';
+import { getAdminFirestore, getAdminAuth } from '@/lib/firebase-admin';
+import { FieldValue } from 'firebase-admin/firestore';
 import { getAdminFromToken } from '@/lib/auth';
 import { requireSuperAdmin } from '@/lib/authorization';
-import { getAdminAuth } from '@/lib/firebase-admin';
 
 // GET single organization
 export async function GET(
@@ -30,29 +19,27 @@ export async function GET(
     if (denied) return denied;
 
     const { id } = await params;
-    const orgRef = doc(db, 'organizations', id);
-    const orgDoc = await getDoc(orgRef);
+    const db = getAdminFirestore();
+    const orgDoc = await db.collection('organizations').doc(id).get();
 
-    if (!orgDoc.exists()) {
+    if (!orgDoc.exists) {
       return NextResponse.json({ error: 'Organization not found' }, { status: 404 });
     }
 
-    const orgData = orgDoc.data();
+    const orgData = orgDoc.data()!;
 
     // Get counts
-    const usersQuery = query(collection(db, 'users'), where('organizationId', '==', id));
-    const channelsQuery = query(collection(db, 'channels'), where('organizationId', '==', id));
     const [usersSnap, channelsSnap] = await Promise.all([
-      getDocs(usersQuery),
-      getDocs(channelsQuery),
+      db.collection('users').where('organizationId', '==', id).get(),
+      db.collection('channels').where('organizationId', '==', id).get(),
     ]);
 
     // Get org admin info
     let orgAdmin = null;
     if (orgData.orgAdminId) {
-      const adminDoc = await getDoc(doc(db, 'admins', orgData.orgAdminId));
-      if (adminDoc.exists()) {
-        const adminData = adminDoc.data();
+      const adminDoc = await db.collection('admins').doc(orgData.orgAdminId).get();
+      if (adminDoc.exists) {
+        const adminData = adminDoc.data()!;
         orgAdmin = {
           id: adminDoc.id,
           email: adminData.email,
@@ -99,22 +86,22 @@ export async function PUT(
     const body = await request.json();
     const { name, packageMaxUsers, packageMaxChannels } = body;
 
-    const orgRef = doc(db, 'organizations', id);
-    const orgDoc = await getDoc(orgRef);
+    const db = getAdminFirestore();
+    const orgDoc = await db.collection('organizations').doc(id).get();
 
-    if (!orgDoc.exists()) {
+    if (!orgDoc.exists) {
       return NextResponse.json({ error: 'Organization not found' }, { status: 404 });
     }
 
     const updateData: Record<string, unknown> = {
-      updatedAt: serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     };
 
     if (name !== undefined) updateData.name = name.trim();
     if (packageMaxUsers !== undefined) updateData.packageMaxUsers = Number(packageMaxUsers);
     if (packageMaxChannels !== undefined) updateData.packageMaxChannels = Number(packageMaxChannels);
 
-    await updateDoc(orgRef, updateData);
+    await db.collection('organizations').doc(id).update(updateData);
 
     return NextResponse.json({ success: true });
   } catch (error) {
@@ -141,19 +128,18 @@ export async function DELETE(
     if (denied) return denied;
 
     const { id } = await params;
-    const orgRef = doc(db, 'organizations', id);
-    const orgDoc = await getDoc(orgRef);
+    const db = getAdminFirestore();
+    const orgDoc = await db.collection('organizations').doc(id).get();
 
-    if (!orgDoc.exists()) {
+    if (!orgDoc.exists) {
       return NextResponse.json({ error: 'Organization not found' }, { status: 404 });
     }
 
-    const orgData = orgDoc.data();
+    const orgData = orgDoc.data()!;
     const adminAuth = getAdminAuth();
 
     // Delete all users in this org (Firestore + Firebase Auth)
-    const usersQuery = query(collection(db, 'users'), where('organizationId', '==', id));
-    const usersSnap = await getDocs(usersQuery);
+    const usersSnap = await db.collection('users').where('organizationId', '==', id).get();
     for (const userDoc of usersSnap.docs) {
       try {
         await adminAuth.deleteUser(userDoc.id);
@@ -162,29 +148,26 @@ export async function DELETE(
           console.warn(`Failed to delete auth user ${userDoc.id}:`, authError);
         }
       }
-      await deleteDoc(userDoc.ref);
+      await userDoc.ref.delete();
     }
 
     // Delete all channels in this org (including members subcollection)
-    const channelsQuery = query(collection(db, 'channels'), where('organizationId', '==', id));
-    const channelsSnap = await getDocs(channelsQuery);
+    const channelsSnap = await db.collection('channels').where('organizationId', '==', id).get();
     for (const channelDoc of channelsSnap.docs) {
-      const membersRef = collection(channelDoc.ref, 'members');
-      const membersSnap = await getDocs(membersRef);
+      const membersSnap = await channelDoc.ref.collection('members').get();
       for (const memberDoc of membersSnap.docs) {
-        await deleteDoc(memberDoc.ref);
+        await memberDoc.ref.delete();
       }
-      await deleteDoc(channelDoc.ref);
+      await channelDoc.ref.delete();
     }
 
     // Delete org admin
     if (orgData.orgAdminId) {
-      const adminRef = doc(db, 'admins', orgData.orgAdminId);
-      await deleteDoc(adminRef);
+      await db.collection('admins').doc(orgData.orgAdminId).delete();
     }
 
     // Delete organization
-    await deleteDoc(orgRef);
+    await db.collection('organizations').doc(id).delete();
 
     return NextResponse.json({ success: true });
   } catch (error) {

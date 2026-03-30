@@ -1,14 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
-import {
-  doc,
-  getDoc,
-  updateDoc,
-  deleteDoc,
-  serverTimestamp,
-  collection,
-  getDocs,
-} from 'firebase/firestore';
+import { getAdminFirestore } from '@/lib/firebase-admin';
+import { FieldValue } from 'firebase-admin/firestore';
 import { getAdminFromToken } from '@/lib/auth';
 import { requireOrgAccess } from '@/lib/authorization';
 
@@ -24,15 +16,15 @@ export async function GET(
     }
 
     const { id } = await params;
-    const channelRef = doc(db, 'channels', id);
-    const channelDoc = await getDoc(channelRef);
+    const db = getAdminFirestore();
+    const channelDoc = await db.collection('channels').doc(id).get();
 
-    if (!channelDoc.exists()) {
+    if (!channelDoc.exists) {
       return NextResponse.json({ error: 'Channel not found' }, { status: 404 });
     }
 
     // Check org access
-    const channelData = channelDoc.data();
+    const channelData = channelDoc.data()!;
     if (channelData.organizationId) {
       const denied = requireOrgAccess(admin, channelData.organizationId);
       if (denied) return denied;
@@ -70,22 +62,22 @@ export async function PUT(
     const body = await request.json();
     const { name, description, isPrivate, isActive } = body;
 
-    const channelRef = doc(db, 'channels', id);
-    const channelDoc = await getDoc(channelRef);
+    const db = getAdminFirestore();
+    const channelDoc = await db.collection('channels').doc(id).get();
 
-    if (!channelDoc.exists()) {
+    if (!channelDoc.exists) {
       return NextResponse.json({ error: 'Channel not found' }, { status: 404 });
     }
 
     // Check org access
-    const channelData = channelDoc.data();
+    const channelData = channelDoc.data()!;
     if (channelData.organizationId) {
       const denied = requireOrgAccess(admin, channelData.organizationId);
       if (denied) return denied;
     }
 
     const updateData: Record<string, unknown> = {
-      updatedAt: serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     };
 
     if (name !== undefined) updateData.name = name.trim();
@@ -93,7 +85,7 @@ export async function PUT(
     if (isPrivate !== undefined) updateData.isPrivate = isPrivate;
     if (isActive !== undefined) updateData.isActive = isActive;
 
-    await updateDoc(channelRef, updateData);
+    await db.collection('channels').doc(id).update(updateData);
 
     return NextResponse.json({ success: true });
   } catch (error) {
@@ -117,29 +109,28 @@ export async function DELETE(
     }
 
     const { id } = await params;
-    const channelRef = doc(db, 'channels', id);
-    const channelDoc = await getDoc(channelRef);
+    const db = getAdminFirestore();
+    const channelDoc = await db.collection('channels').doc(id).get();
 
-    if (!channelDoc.exists()) {
+    if (!channelDoc.exists) {
       return NextResponse.json({ error: 'Channel not found' }, { status: 404 });
     }
 
     // Check org access
-    const channelData = channelDoc.data();
+    const channelData = channelDoc.data()!;
     if (channelData.organizationId) {
       const denied = requireOrgAccess(admin, channelData.organizationId);
       if (denied) return denied;
     }
 
     // Delete members subcollection first
-    const membersRef = collection(channelRef, 'members');
-    const membersSnapshot = await getDocs(membersRef);
+    const membersSnapshot = await db.collection('channels').doc(id).collection('members').get();
     for (const memberDoc of membersSnapshot.docs) {
-      await deleteDoc(memberDoc.ref);
+      await memberDoc.ref.delete();
     }
 
     // Delete the channel
-    await deleteDoc(channelRef);
+    await db.collection('channels').doc(id).delete();
 
     return NextResponse.json({ success: true });
   } catch (error) {

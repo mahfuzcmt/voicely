@@ -1,14 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
-import {
-  doc,
-  getDoc,
-  updateDoc,
-  deleteDoc,
-  serverTimestamp,
-} from 'firebase/firestore';
+import { getAdminFirestore, getAdminAuth } from '@/lib/firebase-admin';
+import { FieldValue } from 'firebase-admin/firestore';
 import { getAdminFromToken } from '@/lib/auth';
-import { getAdminAuth } from '@/lib/firebase-admin';
 import { requireOrgAccess } from '@/lib/authorization';
 
 // Convert phone number to email format (same as mobile app)
@@ -29,15 +22,15 @@ export async function GET(
     }
 
     const { id } = await params;
-    const userRef = doc(db, 'users', id);
-    const userDoc = await getDoc(userRef);
+    const db = getAdminFirestore();
+    const userDoc = await db.collection('users').doc(id).get();
 
-    if (!userDoc.exists()) {
+    if (!userDoc.exists) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
     // Check org access
-    const userData = userDoc.data();
+    const userData = userDoc.data()!;
     if (userData.organizationId) {
       const denied = requireOrgAccess(admin, userData.organizationId);
       if (denied) return denied;
@@ -76,15 +69,15 @@ export async function PUT(
     const body = await request.json();
     const { displayName, phoneNumber, password, status } = body;
 
-    const userRef = doc(db, 'users', id);
-    const userDoc = await getDoc(userRef);
+    const db = getAdminFirestore();
+    const userDoc = await db.collection('users').doc(id).get();
 
-    if (!userDoc.exists()) {
+    if (!userDoc.exists) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
     // Check org access
-    const userData = userDoc.data();
+    const userData = userDoc.data()!;
     if (userData.organizationId) {
       const denied = requireOrgAccess(admin, userData.organizationId);
       if (denied) return denied;
@@ -141,7 +134,7 @@ export async function PUT(
 
     // Update Firestore
     const updateData: Record<string, unknown> = {
-      updatedAt: serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     };
 
     if (displayName !== undefined) updateData.displayName = displayName.trim();
@@ -151,7 +144,7 @@ export async function PUT(
     }
     if (status !== undefined) updateData.status = status;
 
-    await updateDoc(userRef, updateData);
+    await db.collection('users').doc(id).update(updateData);
 
     return NextResponse.json({ success: true, authCreated: !userExistsInAuth });
   } catch (error: any) {
@@ -183,15 +176,15 @@ export async function DELETE(
     }
 
     const { id } = await params;
-    const userRef = doc(db, 'users', id);
-    const userDoc = await getDoc(userRef);
+    const db = getAdminFirestore();
+    const userDoc = await db.collection('users').doc(id).get();
 
-    if (!userDoc.exists()) {
+    if (!userDoc.exists) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
     // Check org access
-    const userData = userDoc.data();
+    const userData = userDoc.data()!;
     if (userData.organizationId) {
       const denied = requireOrgAccess(admin, userData.organizationId);
       if (denied) return denied;
@@ -208,7 +201,7 @@ export async function DELETE(
     }
 
     // Delete from Firestore
-    await deleteDoc(userRef);
+    await db.collection('users').doc(id).delete();
 
     return NextResponse.json({ success: true });
   } catch (error) {

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, getDoc, doc } from 'firebase/firestore';
+import { getAdminFirestore } from '@/lib/firebase-admin';
 import { verifyPassword, generateToken, setAuthCookie } from '@/lib/auth';
 import { Admin } from '@/types';
 
@@ -16,9 +15,8 @@ export async function POST(request: NextRequest) {
     }
 
     // Find admin by email
-    const adminsRef = collection(db, 'admins');
-    const q = query(adminsRef, where('email', '==', email.toLowerCase()));
-    const querySnapshot = await getDocs(q);
+    const db = getAdminFirestore();
+    const querySnapshot = await db.collection('admins').where('email', '==', email.toLowerCase()).get();
 
     if (querySnapshot.empty) {
       return NextResponse.json(
@@ -42,9 +40,9 @@ export async function POST(request: NextRequest) {
     // Get organization name if org_admin
     let organizationName: string | null = null;
     if (adminData.organizationId) {
-      const orgDoc = await getDoc(doc(db, 'organizations', adminData.organizationId));
-      if (orgDoc.exists()) {
-        organizationName = orgDoc.data().name;
+      const orgDoc = await db.collection('organizations').doc(adminData.organizationId).get();
+      if (orgDoc.exists) {
+        organizationName = orgDoc.data()?.name || null;
       }
     }
 

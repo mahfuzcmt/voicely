@@ -1,6 +1,5 @@
-import { db } from '@/lib/firebase';
-import { collection, getDocs, query, where } from 'firebase/firestore';
-import { Users, Radio, MessageSquare, Activity, Building2, Package } from 'lucide-react';
+import { getAdminFirestore } from '@/lib/firebase-admin';
+import { Users, Radio, MessageSquare, Activity, Building2 } from 'lucide-react';
 import { getAdminFromToken } from '@/lib/auth';
 import { redirect } from 'next/navigation';
 
@@ -8,31 +7,28 @@ async function getStats(admin: { role: string; organizationId: string | null; or
   try {
     const isSuper = admin.role === 'super_admin';
     const orgId = admin.organizationId;
+    const db = getAdminFirestore();
 
-    // Build queries based on role
-    const usersRef = collection(db, 'users');
-    const channelsRef = collection(db, 'channels');
-
-    let usersQuery;
-    let activeUsersQuery;
-    let channelsQuery;
+    let usersSnap;
+    let activeUsersSnap;
+    let channelsSnap;
+    let messagesSnap;
 
     if (isSuper) {
-      usersQuery = usersRef;
-      activeUsersQuery = query(usersRef, where('status', '==', 'online'));
-      channelsQuery = channelsRef;
+      [usersSnap, activeUsersSnap, channelsSnap, messagesSnap] = await Promise.all([
+        db.collection('users').get(),
+        db.collection('users').where('status', '==', 'online').get(),
+        db.collection('channels').get(),
+        db.collection('messages').get(),
+      ]);
     } else {
-      usersQuery = query(usersRef, where('organizationId', '==', orgId));
-      activeUsersQuery = query(usersRef, where('organizationId', '==', orgId), where('status', '==', 'online'));
-      channelsQuery = query(channelsRef, where('organizationId', '==', orgId));
+      [usersSnap, activeUsersSnap, channelsSnap, messagesSnap] = await Promise.all([
+        db.collection('users').where('organizationId', '==', orgId).get(),
+        db.collection('users').where('organizationId', '==', orgId).where('status', '==', 'online').get(),
+        db.collection('channels').where('organizationId', '==', orgId).get(),
+        db.collection('messages').get(),
+      ]);
     }
-
-    const [usersSnap, activeUsersSnap, channelsSnap, messagesSnap] = await Promise.all([
-      getDocs(usersQuery),
-      getDocs(activeUsersQuery),
-      getDocs(channelsQuery),
-      getDocs(collection(db, 'messages')),
-    ]);
 
     // For super admin, get org count
     let totalOrgs = 0;
@@ -40,14 +36,13 @@ async function getStats(admin: { role: string; organizationId: string | null; or
     let packageMaxChannels = 0;
 
     if (isSuper) {
-      const orgsSnap = await getDocs(collection(db, 'organizations'));
+      const orgsSnap = await db.collection('organizations').get();
       totalOrgs = orgsSnap.size;
     } else if (orgId) {
       // Get package limits for org admin
-      const { getDoc, doc } = await import('firebase/firestore');
-      const orgDoc = await getDoc(doc(db, 'organizations', orgId));
-      if (orgDoc.exists()) {
-        const orgData = orgDoc.data();
+      const orgDoc = await db.collection('organizations').doc(orgId).get();
+      if (orgDoc.exists) {
+        const orgData = orgDoc.data()!;
         packageMaxUsers = orgData.packageMaxUsers;
         packageMaxChannels = orgData.packageMaxChannels;
       }

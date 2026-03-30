@@ -1,20 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
-import {
-  doc,
-  getDoc,
-  getDocs,
-  setDoc,
-  deleteDoc,
-  updateDoc,
-  collection,
-  query,
-  where,
-  serverTimestamp,
-  arrayUnion,
-  arrayRemove,
-  increment,
-} from 'firebase/firestore';
+import { getAdminFirestore } from '@/lib/firebase-admin';
+import { FieldValue } from 'firebase-admin/firestore';
 import { getAdminFromToken } from '@/lib/auth';
 import { getOrgFilter, requireOrgAccess } from '@/lib/authorization';
 
@@ -31,29 +17,24 @@ export async function GET(
 
     const { id: userId } = await params;
     const orgFilter = getOrgFilter(admin);
+    const db = getAdminFirestore();
 
     // Verify user belongs to admin's org
     if (orgFilter) {
-      const userDoc = await getDoc(doc(db, 'users', userId));
-      if (userDoc.exists() && userDoc.data().organizationId !== orgFilter) {
+      const userDoc = await db.collection('users').doc(userId).get();
+      if (userDoc.exists && userDoc.data()?.organizationId !== orgFilter) {
         return NextResponse.json({ error: 'Access denied' }, { status: 403 });
       }
     }
 
     // Find all channels where user is a member
-    const channelsRef = collection(db, 'channels');
-    let q;
-    if (orgFilter) {
-      q = query(
-        channelsRef,
-        where('memberIds', 'array-contains', userId),
-        where('organizationId', '==', orgFilter)
-      );
-    } else {
-      q = query(channelsRef, where('memberIds', 'array-contains', userId));
-    }
-    const snapshot = await getDocs(q);
+    let queryRef = db.collection('channels').where('memberIds', 'array-contains', userId);
 
+    if (orgFilter) {
+      queryRef = queryRef.where('organizationId', '==', orgFilter);
+    }
+
+    const snapshot = await queryRef.get();
     const channelIds = snapshot.docs.map((doc) => doc.id);
 
     return NextResponse.json({ channelIds });
@@ -82,17 +63,17 @@ export async function PUT(
     const { channelIds = [] } = body;
 
     const orgFilter = getOrgFilter(admin);
+    const db = getAdminFirestore();
 
     // Get user info
-    const userRef = doc(db, 'users', userId);
-    const userDoc = await getDoc(userRef);
+    const userDoc = await db.collection('users').doc(userId).get();
 
-    if (!userDoc.exists()) {
+    if (!userDoc.exists) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
     // Check org access for the user
-    const userData = userDoc.data();
+    const userData = userDoc.data()!;
     if (userData.organizationId) {
       const denied = requireOrgAccess(admin, userData.organizationId);
       if (denied) return denied;
@@ -101,8 +82,8 @@ export async function PUT(
     // Verify all requested channels belong to the org (for org_admin)
     if (orgFilter) {
       for (const channelId of channelIds) {
-        const channelDoc = await getDoc(doc(db, 'channels', channelId));
-        if (channelDoc.exists() && channelDoc.data().organizationId !== orgFilter) {
+        const channelDoc = await db.collection('channels').doc(channelId).get();
+        if (channelDoc.exists && channelDoc.data()?.organizationId !== orgFilter) {
           return NextResponse.json(
             { error: `Channel ${channelId} does not belong to your organization` },
             { status: 403 }
@@ -112,21 +93,11 @@ export async function PUT(
     }
 
     // Get current channel memberships (scoped to org if needed)
-    const channelsRef = collection(db, 'channels');
-    let currentMembershipsQuery;
+    let currentMembershipsQuery = db.collection('channels').where('memberIds', 'array-contains', userId);
     if (orgFilter) {
-      currentMembershipsQuery = query(
-        channelsRef,
-        where('memberIds', 'array-contains', userId),
-        where('organizationId', '==', orgFilter)
-      );
-    } else {
-      currentMembershipsQuery = query(
-        channelsRef,
-        where('memberIds', 'array-contains', userId)
-      );
+      currentMembershipsQuery = currentMembershipsQuery.where('organizationId', '==', orgFilter);
     }
-    const currentMemberships = await getDocs(currentMembershipsQuery);
+    const currentMemberships = await currentMembershipsQuery.get();
     const currentChannelIds = currentMemberships.docs.map((doc) => doc.id);
 
     // Channels to add
@@ -141,41 +112,37 @@ export async function PUT(
 
     // Add user to new channels
     for (const channelId of channelsToAdd) {
-      const channelRef = doc(db, 'channels', channelId);
-      const channelDoc = await getDoc(channelRef);
+      const channelDoc = await db.collection('channels').doc(channelId).get();
 
-      if (channelDoc.exists()) {
-        await updateDoc(channelRef, {
-          memberIds: arrayUnion(userId),
-          memberCount: increment(1),
-          updatedAt: serverTimestamp(),
+      if (channelDoc.exists) {
+        await db.collection('channels').doc(channelId).update({
+          memberIds: FieldValue.arrayUnion(userId),
+          memberCount: FieldValue.increment(1),
+          updatedAt: FieldValue.serverTimestamp(),
         });
 
-        const memberRef = doc(channelRef, 'members', userId);
-        await setDoc(memberRef, {
+        await db.collection('channels').doc(channelId).collection('members').doc(userId).set({
           userId,
           channelId,
           role: 'member',
           isMuted: false,
-          joinedAt: serverTimestamp(),
+          joinedAt: FieldValue.serverTimestamp(),
         });
       }
     }
 
     // Remove user from old channels
     for (const channelId of channelsToRemove) {
-      const channelRef = doc(db, 'channels', channelId);
-      const channelDoc = await getDoc(channelRef);
+      const channelDoc = await db.collection('channels').doc(channelId).get();
 
-      if (channelDoc.exists()) {
-        await updateDoc(channelRef, {
-          memberIds: arrayRemove(userId),
-          memberCount: increment(-1),
-          updatedAt: serverTimestamp(),
+      if (channelDoc.exists) {
+        await db.collection('channels').doc(channelId).update({
+          memberIds: FieldValue.arrayRemove(userId),
+          memberCount: FieldValue.increment(-1),
+          updatedAt: FieldValue.serverTimestamp(),
         });
 
-        const memberRef = doc(channelRef, 'members', userId);
-        await deleteDoc(memberRef);
+        await db.collection('channels').doc(channelId).collection('members').doc(userId).delete();
       }
     }
 

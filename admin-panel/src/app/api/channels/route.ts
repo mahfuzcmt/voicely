@@ -1,15 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, storage } from '@/lib/firebase';
-import {
-  collection,
-  getDocs,
-  addDoc,
-  serverTimestamp,
-  orderBy,
-  query,
-  where,
-} from 'firebase/firestore';
-import { ref, uploadString } from 'firebase/storage';
+import { getAdminFirestore, getAdminStorage } from '@/lib/firebase-admin';
+import { FieldValue } from 'firebase-admin/firestore';
 import { getAdminFromToken } from '@/lib/auth';
 import { getOrgFilter, checkPackageLimit, getOrgLimits } from '@/lib/authorization';
 
@@ -27,21 +18,33 @@ export async function GET(request: NextRequest) {
     const orgFilter = getOrgFilter(admin);
     const effectiveOrgId = orgFilter || orgIdParam;
 
-    const channelsRef = collection(db, 'channels');
-    let q;
-    if (effectiveOrgId) {
-      q = query(channelsRef, where('organizationId', '==', effectiveOrgId), orderBy('createdAt', 'desc'));
-    } else {
-      q = query(channelsRef, orderBy('createdAt', 'desc'));
-    }
-    const snapshot = await getDocs(q);
+    const db = getAdminFirestore();
+    let queryRef;
 
-    const channels = snapshot.docs.map((doc) => ({
+    if (effectiveOrgId) {
+      // Use simple query to avoid composite index requirement
+      queryRef = db.collection('channels').where('organizationId', '==', effectiveOrgId);
+    } else {
+      queryRef = db.collection('channels').orderBy('createdAt', 'desc');
+    }
+
+    const snapshot = await queryRef.get();
+
+    let channels = snapshot.docs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
       createdAt: doc.data().createdAt?.toDate?.() || null,
       updatedAt: doc.data().updatedAt?.toDate?.() || null,
     }));
+
+    // Sort by createdAt if we filtered by org (since we couldn't use orderBy with where)
+    if (effectiveOrgId) {
+      channels.sort((a: any, b: any) => {
+        const aTime = a.createdAt?.getTime?.() || 0;
+        const bTime = b.createdAt?.getTime?.() || 0;
+        return bTime - aTime;
+      });
+    }
 
     // Include limits info for org admins
     let limits = null;
@@ -98,8 +101,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const channelsRef = collection(db, 'channels');
-    const docRef = await addDoc(channelsRef, {
+    const db = getAdminFirestore();
+    const docRef = await db.collection('channels').add({
       name: name.trim(),
       description: description?.trim() || null,
       ownerId: admin.adminId,
@@ -109,14 +112,16 @@ export async function POST(request: NextRequest) {
       memberCount: 0,
       memberIds: [],
       organizationId,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     });
 
     // Create audio archive storage directory with a .keep placeholder
     try {
-      const keepRef = ref(storage, `channels/${docRef.id}/audio/.keep`);
-      await uploadString(keepRef, '');
+      const storage = getAdminStorage();
+      const bucket = storage.bucket();
+      const file = bucket.file(`channels/${docRef.id}/audio/.keep`);
+      await file.save('');
     } catch (storageError) {
       console.warn('Failed to create audio storage directory:', storageError);
     }

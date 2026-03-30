@@ -1,19 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
-import {
-  collection,
-  getDocs,
-  getDoc,
-  doc,
-  setDoc,
-  serverTimestamp,
-  orderBy,
-  query,
-  where,
-} from 'firebase/firestore';
+import { getAdminFirestore, getAdminAuth } from '@/lib/firebase-admin';
+import { FieldValue } from 'firebase-admin/firestore';
 import { getAdminFromToken } from '@/lib/auth';
-import { getAdminAuth } from '@/lib/firebase-admin';
-import { isSuperAdmin, getOrgFilter, checkPackageLimit, getOrgLimits } from '@/lib/authorization';
+import { getOrgFilter, checkPackageLimit, getOrgLimits } from '@/lib/authorization';
 
 // Convert phone number to email format (same as mobile app)
 function phoneToEmail(phoneNumber: string): string {
@@ -37,14 +26,14 @@ export async function GET(request: NextRequest) {
     const orgFilter = getOrgFilter(admin);
     const effectiveOrgId = orgFilter || orgIdParam; // org_admin uses their org, super_admin can filter
 
-    const usersRef = collection(db, 'users');
+    const db = getAdminFirestore();
     let users: any[] = [];
 
     if (channelId) {
       // Get channel to find member IDs
-      const channelDoc = await getDoc(doc(db, 'channels', channelId));
-      if (channelDoc.exists()) {
-        const channelData = channelDoc.data();
+      const channelDoc = await db.collection('channels').doc(channelId).get();
+      if (channelDoc.exists) {
+        const channelData = channelDoc.data()!;
 
         // Org admin: verify channel belongs to their org
         if (orgFilter && channelData.organizationId !== orgFilter) {
@@ -58,8 +47,7 @@ export async function GET(request: NextRequest) {
           const batchSize = 30;
           for (let i = 0; i < memberIds.length; i += batchSize) {
             const batch = memberIds.slice(i, i + batchSize);
-            const q = query(usersRef, where('__name__', 'in', batch));
-            const snapshot = await getDocs(q);
+            const snapshot = await db.collection('users').where('__name__', 'in', batch).get();
 
             snapshot.docs.forEach((doc) => {
               const data = doc.data();
@@ -79,13 +67,14 @@ export async function GET(request: NextRequest) {
       }
     } else {
       // Build query with org filter
-      let q;
+      let queryRef;
       if (effectiveOrgId) {
-        q = query(usersRef, where('organizationId', '==', effectiveOrgId), orderBy('createdAt', 'desc'));
+        // Use separate queries to avoid composite index requirement
+        queryRef = db.collection('users').where('organizationId', '==', effectiveOrgId);
       } else {
-        q = query(usersRef, orderBy('createdAt', 'desc'));
+        queryRef = db.collection('users').orderBy('createdAt', 'desc');
       }
-      const snapshot = await getDocs(q);
+      const snapshot = await queryRef.get();
 
       users = snapshot.docs.map((doc) => ({
         id: doc.id,
@@ -94,6 +83,15 @@ export async function GET(request: NextRequest) {
         createdAt: doc.data().createdAt?.toDate?.() || null,
         updatedAt: doc.data().updatedAt?.toDate?.() || null,
       }));
+
+      // Sort by createdAt if we filtered by org (since we couldn't use orderBy with where)
+      if (effectiveOrgId) {
+        users.sort((a, b) => {
+          const aTime = a.createdAt?.getTime?.() || 0;
+          const bTime = b.createdAt?.getTime?.() || 0;
+          return bTime - aTime;
+        });
+      }
     }
 
     // Include limits info for org admins
@@ -170,15 +168,15 @@ export async function POST(request: NextRequest) {
     });
 
     // Create user document in Firestore with the same UID
-    const userRef = doc(db, 'users', userRecord.uid);
-    await setDoc(userRef, {
+    const db = getAdminFirestore();
+    await db.collection('users').doc(userRecord.uid).set({
       displayName: displayName.trim(),
       phoneNumber: phoneNumber.trim(),
       email: authEmail,
       status,
       organizationId,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     });
 
     return NextResponse.json({

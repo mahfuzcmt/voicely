@@ -165,9 +165,9 @@ export default function UsersPage() {
 
   const filteredUsers = users.filter(
     (user) =>
-      user.displayName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      user.phoneNumber.includes(searchTerm) ||
-      user.email?.toLowerCase().includes(searchTerm.toLowerCase())
+      (user.displayName || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (user.phoneNumber || '').includes(searchTerm) ||
+      (user.email || '').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   const atUserLimit = limits ? limits.currentUsers >= limits.maxUsers : false;
@@ -224,7 +224,7 @@ export default function UsersPage() {
             <option value="">All Channels</option>
             {channels.map((channel) => (
               <option key={channel.id} value={channel.id}>
-                {channel.name}
+                {channel.name || 'Unnamed Channel'}
               </option>
             ))}
           </select>
@@ -257,11 +257,11 @@ export default function UsersPage() {
                     <div className="flex items-center gap-3">
                       <div className="w-10 h-10 bg-primary-100 rounded-full flex items-center justify-center">
                         <span className="text-primary-600 font-semibold">
-                          {user.displayName.charAt(0).toUpperCase()}
+                          {(user.displayName || user.phoneNumber || '?').charAt(0).toUpperCase()}
                         </span>
                       </div>
                       <div>
-                        <p className="font-medium text-gray-900">{user.displayName}</p>
+                        <p className="font-medium text-gray-900">{user.displayName || user.phoneNumber || 'Unknown User'}</p>
                         {user.email && (
                           <p className="text-sm text-gray-500">{user.email}</p>
                         )}

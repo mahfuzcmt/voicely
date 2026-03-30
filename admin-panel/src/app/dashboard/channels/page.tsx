@@ -118,8 +118,8 @@ export default function ChannelsPage() {
 
   const filteredChannels = channels.filter(
     (channel) =>
-      channel.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      channel.description?.toLowerCase().includes(searchTerm.toLowerCase())
+      (channel.name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (channel.description || '').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   const atChannelLimit = limits ? limits.currentChannels >= limits.maxChannels : false;
@@ -193,7 +193,7 @@ export default function ChannelsPage() {
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
-                      <h3 className="font-semibold text-gray-900">{channel.name}</h3>
+                      <h3 className="font-semibold text-gray-900">{channel.name || 'Unnamed Channel'}</h3>
                       {!isActive && (
                         <span className="px-2 py-0.5 text-xs font-medium bg-red-100 text-red-700 rounded-full">
                           Inactive
