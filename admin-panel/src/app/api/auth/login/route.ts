@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { collection, query, where, getDocs, getDoc, doc } from 'firebase/firestore';
 import { verifyPassword, generateToken, setAuthCookie } from '@/lib/auth';
 import { Admin } from '@/types';
 
@@ -39,12 +39,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Get organization name if org_admin
+    let organizationName: string | null = null;
+    if (adminData.organizationId) {
+      const orgDoc = await getDoc(doc(db, 'organizations', adminData.organizationId));
+      if (orgDoc.exists()) {
+        organizationName = orgDoc.data().name;
+      }
+    }
+
     // Generate token
     const admin: Admin = {
       id: adminDoc.id,
       email: adminData.email,
       displayName: adminData.displayName,
       role: adminData.role,
+      organizationId: adminData.organizationId || null,
+      organizationName,
       createdAt: adminData.createdAt?.toDate(),
       updatedAt: adminData.updatedAt?.toDate(),
     };
@@ -61,6 +72,8 @@ export async function POST(request: NextRequest) {
         email: admin.email,
         displayName: admin.displayName,
         role: admin.role,
+        organizationId: admin.organizationId,
+        organizationName,
       },
     });
   } catch (error) {

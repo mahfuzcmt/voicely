@@ -13,6 +13,7 @@ import {
 } from 'firebase/firestore';
 import { getAdminFromToken } from '@/lib/auth';
 import { getAdminAuth } from '@/lib/firebase-admin';
+import { isSuperAdmin, getOrgFilter, checkPackageLimit, getOrgLimits } from '@/lib/authorization';
 
 // Convert phone number to email format (same as mobile app)
 function phoneToEmail(phoneNumber: string): string {
@@ -30,6 +31,11 @@ export async function GET(request: NextRequest) {
 
     const { searchParams } = new URL(request.url);
     const channelId = searchParams.get('channelId');
+    const orgIdParam = searchParams.get('organizationId');
+
+    // Determine org scope
+    const orgFilter = getOrgFilter(admin);
+    const effectiveOrgId = orgFilter || orgIdParam; // org_admin uses their org, super_admin can filter
 
     const usersRef = collection(db, 'users');
     let users: any[] = [];
@@ -38,7 +44,14 @@ export async function GET(request: NextRequest) {
       // Get channel to find member IDs
       const channelDoc = await getDoc(doc(db, 'channels', channelId));
       if (channelDoc.exists()) {
-        const memberIds = channelDoc.data().memberIds || [];
+        const channelData = channelDoc.data();
+
+        // Org admin: verify channel belongs to their org
+        if (orgFilter && channelData.organizationId !== orgFilter) {
+          return NextResponse.json({ error: 'Access denied' }, { status: 403 });
+        }
+
+        const memberIds = channelData.memberIds || [];
 
         if (memberIds.length > 0) {
           // Firestore 'in' query supports max 30 items, so batch if needed
@@ -49,20 +62,29 @@ export async function GET(request: NextRequest) {
             const snapshot = await getDocs(q);
 
             snapshot.docs.forEach((doc) => {
-              users.push({
-                id: doc.id,
-                ...doc.data(),
-                lastSeen: doc.data().lastSeen?.toDate?.() || null,
-                createdAt: doc.data().createdAt?.toDate?.() || null,
-                updatedAt: doc.data().updatedAt?.toDate?.() || null,
-              });
+              const data = doc.data();
+              // Extra safety: only include users from the effective org
+              if (!effectiveOrgId || data.organizationId === effectiveOrgId) {
+                users.push({
+                  id: doc.id,
+                  ...data,
+                  lastSeen: data.lastSeen?.toDate?.() || null,
+                  createdAt: data.createdAt?.toDate?.() || null,
+                  updatedAt: data.updatedAt?.toDate?.() || null,
+                });
+              }
             });
           }
         }
       }
     } else {
-      // Get all users
-      const q = query(usersRef, orderBy('createdAt', 'desc'));
+      // Build query with org filter
+      let q;
+      if (effectiveOrgId) {
+        q = query(usersRef, where('organizationId', '==', effectiveOrgId), orderBy('createdAt', 'desc'));
+      } else {
+        q = query(usersRef, orderBy('createdAt', 'desc'));
+      }
       const snapshot = await getDocs(q);
 
       users = snapshot.docs.map((doc) => ({
@@ -74,7 +96,14 @@ export async function GET(request: NextRequest) {
       }));
     }
 
-    return NextResponse.json({ users });
+    // Include limits info for org admins
+    let limits = null;
+    const limitsOrgId = orgFilter || orgIdParam;
+    if (limitsOrgId) {
+      limits = await getOrgLimits(limitsOrgId);
+    }
+
+    return NextResponse.json({ users, limits });
   } catch (error) {
     console.error('Error fetching users:', error);
     return NextResponse.json(
@@ -93,7 +122,18 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { displayName, phoneNumber, password, status = 'offline' } = body;
+    const { displayName, phoneNumber, password, status = 'offline', organizationId: bodyOrgId } = body;
+
+    // Determine organization
+    const orgFilter = getOrgFilter(admin);
+    const organizationId = orgFilter || bodyOrgId;
+
+    if (!organizationId) {
+      return NextResponse.json(
+        { error: 'Organization is required' },
+        { status: 400 }
+      );
+    }
 
     if (!displayName?.trim() || !phoneNumber?.trim()) {
       return NextResponse.json(
@@ -105,6 +145,15 @@ export async function POST(request: NextRequest) {
     if (!password?.trim()) {
       return NextResponse.json(
         { error: 'Password is required' },
+        { status: 400 }
+      );
+    }
+
+    // Check package limit
+    const limit = await checkPackageLimit(organizationId, 'users');
+    if (!limit.allowed) {
+      return NextResponse.json(
+        { error: `User limit reached (${limit.current}/${limit.max}). Upgrade the organization package to add more users.` },
         { status: 400 }
       );
     }
@@ -127,6 +176,7 @@ export async function POST(request: NextRequest) {
       phoneNumber: phoneNumber.trim(),
       email: authEmail,
       status,
+      organizationId,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -139,25 +189,19 @@ export async function POST(request: NextRequest) {
         phoneNumber: phoneNumber.trim(),
         email: authEmail,
         status,
+        organizationId,
       },
     });
   } catch (error: any) {
     console.error('Error creating user:', error);
 
-    // Handle Firebase Auth specific errors
     if (error.code === 'auth/email-already-exists') {
       return NextResponse.json(
         { error: 'A user with this phone number already exists' },
         { status: 400 }
       );
     }
-    if (error.code === 'auth/invalid-password') {
-      return NextResponse.json(
-        { error: 'Password must be at least 6 characters' },
-        { status: 400 }
-      );
-    }
-    if (error.code === 'auth/weak-password') {
+    if (error.code === 'auth/invalid-password' || error.code === 'auth/weak-password') {
       return NextResponse.json(
         { error: 'Password must be at least 6 characters' },
         { status: 400 }

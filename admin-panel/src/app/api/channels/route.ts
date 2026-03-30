@@ -7,20 +7,33 @@ import {
   serverTimestamp,
   orderBy,
   query,
+  where,
 } from 'firebase/firestore';
 import { ref, uploadString } from 'firebase/storage';
 import { getAdminFromToken } from '@/lib/auth';
+import { getOrgFilter, checkPackageLimit, getOrgLimits } from '@/lib/authorization';
 
 // GET all channels
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
     const admin = await getAdminFromToken();
     if (!admin) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const { searchParams } = new URL(request.url);
+    const orgIdParam = searchParams.get('organizationId');
+
+    const orgFilter = getOrgFilter(admin);
+    const effectiveOrgId = orgFilter || orgIdParam;
+
     const channelsRef = collection(db, 'channels');
-    const q = query(channelsRef, orderBy('createdAt', 'desc'));
+    let q;
+    if (effectiveOrgId) {
+      q = query(channelsRef, where('organizationId', '==', effectiveOrgId), orderBy('createdAt', 'desc'));
+    } else {
+      q = query(channelsRef, orderBy('createdAt', 'desc'));
+    }
     const snapshot = await getDocs(q);
 
     const channels = snapshot.docs.map((doc) => ({
@@ -30,7 +43,14 @@ export async function GET() {
       updatedAt: doc.data().updatedAt?.toDate?.() || null,
     }));
 
-    return NextResponse.json({ channels });
+    // Include limits info for org admins
+    let limits = null;
+    const limitsOrgId = orgFilter || orgIdParam;
+    if (limitsOrgId) {
+      limits = await getOrgLimits(limitsOrgId);
+    }
+
+    return NextResponse.json({ channels, limits });
   } catch (error) {
     console.error('Error fetching channels:', error);
     return NextResponse.json(
@@ -49,11 +69,31 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { name, description, isPrivate = false } = body;
+    const { name, description, isPrivate = false, organizationId: bodyOrgId } = body;
+
+    // Determine organization
+    const orgFilter = getOrgFilter(admin);
+    const organizationId = orgFilter || bodyOrgId;
+
+    if (!organizationId) {
+      return NextResponse.json(
+        { error: 'Organization is required' },
+        { status: 400 }
+      );
+    }
 
     if (!name?.trim()) {
       return NextResponse.json(
         { error: 'Channel name is required' },
+        { status: 400 }
+      );
+    }
+
+    // Check package limit
+    const limit = await checkPackageLimit(organizationId, 'channels');
+    if (!limit.allowed) {
+      return NextResponse.json(
+        { error: `Channel limit reached (${limit.current}/${limit.max}). Upgrade the organization package to add more channels.` },
         { status: 400 }
       );
     }
@@ -68,6 +108,7 @@ export async function POST(request: NextRequest) {
       audioArchiveEnabled: true,
       memberCount: 0,
       memberIds: [],
+      organizationId,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -91,6 +132,7 @@ export async function POST(request: NextRequest) {
         audioArchiveEnabled: true,
         memberCount: 0,
         memberIds: [],
+        organizationId,
       },
     });
   } catch (error) {

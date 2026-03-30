@@ -7,20 +7,29 @@ import {
   Radio,
   Users,
   Mic,
+  Building2,
   BarChart3,
   Settings,
 } from 'lucide-react';
+import { JwtPayload } from '@/lib/auth';
 
-const menuItems = [
-  { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { name: 'Channels', href: '/dashboard/channels', icon: Radio },
-  { name: 'Users', href: '/dashboard/users', icon: Users },
-  { name: 'Reports', href: '/dashboard/reports', icon: BarChart3 },
-  { name: 'Settings', href: '/dashboard/settings', icon: Settings },
-];
+interface SidebarProps {
+  admin: JwtPayload;
+}
 
-export default function Sidebar() {
+export default function Sidebar({ admin }: SidebarProps) {
   const pathname = usePathname();
+
+  const menuItems = [
+    { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+    ...(admin.role === 'super_admin'
+      ? [{ name: 'Organizations', href: '/dashboard/organizations', icon: Building2 }]
+      : []),
+    { name: 'Channels', href: '/dashboard/channels', icon: Radio },
+    { name: 'Users', href: '/dashboard/users', icon: Users },
+    { name: 'Reports', href: '/dashboard/reports', icon: BarChart3 },
+    { name: 'Settings', href: '/dashboard/settings', icon: Settings },
+  ];
 
   return (
     <aside className="w-64 bg-white border-r border-gray-200 flex flex-col">

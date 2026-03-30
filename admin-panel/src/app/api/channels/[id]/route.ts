@@ -10,6 +10,7 @@ import {
   getDocs,
 } from 'firebase/firestore';
 import { getAdminFromToken } from '@/lib/auth';
+import { requireOrgAccess } from '@/lib/authorization';
 
 // GET single channel
 export async function GET(
@@ -30,12 +31,19 @@ export async function GET(
       return NextResponse.json({ error: 'Channel not found' }, { status: 404 });
     }
 
+    // Check org access
+    const channelData = channelDoc.data();
+    if (channelData.organizationId) {
+      const denied = requireOrgAccess(admin, channelData.organizationId);
+      if (denied) return denied;
+    }
+
     return NextResponse.json({
       channel: {
         id: channelDoc.id,
-        ...channelDoc.data(),
-        createdAt: channelDoc.data().createdAt?.toDate?.() || null,
-        updatedAt: channelDoc.data().updatedAt?.toDate?.() || null,
+        ...channelData,
+        createdAt: channelData.createdAt?.toDate?.() || null,
+        updatedAt: channelData.updatedAt?.toDate?.() || null,
       },
     });
   } catch (error) {
@@ -67,6 +75,13 @@ export async function PUT(
 
     if (!channelDoc.exists()) {
       return NextResponse.json({ error: 'Channel not found' }, { status: 404 });
+    }
+
+    // Check org access
+    const channelData = channelDoc.data();
+    if (channelData.organizationId) {
+      const denied = requireOrgAccess(admin, channelData.organizationId);
+      if (denied) return denied;
     }
 
     const updateData: Record<string, unknown> = {
@@ -107,6 +122,13 @@ export async function DELETE(
 
     if (!channelDoc.exists()) {
       return NextResponse.json({ error: 'Channel not found' }, { status: 404 });
+    }
+
+    // Check org access
+    const channelData = channelDoc.data();
+    if (channelData.organizationId) {
+      const denied = requireOrgAccess(admin, channelData.organizationId);
+      if (denied) return denied;
     }
 
     // Delete members subcollection first

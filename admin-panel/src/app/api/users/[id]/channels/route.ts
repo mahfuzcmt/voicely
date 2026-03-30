@@ -16,6 +16,7 @@ import {
   increment,
 } from 'firebase/firestore';
 import { getAdminFromToken } from '@/lib/auth';
+import { getOrgFilter, requireOrgAccess } from '@/lib/authorization';
 
 // GET user's assigned channels
 export async function GET(
@@ -29,10 +30,28 @@ export async function GET(
     }
 
     const { id: userId } = await params;
+    const orgFilter = getOrgFilter(admin);
+
+    // Verify user belongs to admin's org
+    if (orgFilter) {
+      const userDoc = await getDoc(doc(db, 'users', userId));
+      if (userDoc.exists() && userDoc.data().organizationId !== orgFilter) {
+        return NextResponse.json({ error: 'Access denied' }, { status: 403 });
+      }
+    }
 
     // Find all channels where user is a member
     const channelsRef = collection(db, 'channels');
-    const q = query(channelsRef, where('memberIds', 'array-contains', userId));
+    let q;
+    if (orgFilter) {
+      q = query(
+        channelsRef,
+        where('memberIds', 'array-contains', userId),
+        where('organizationId', '==', orgFilter)
+      );
+    } else {
+      q = query(channelsRef, where('memberIds', 'array-contains', userId));
+    }
     const snapshot = await getDocs(q);
 
     const channelIds = snapshot.docs.map((doc) => doc.id);
@@ -62,6 +81,8 @@ export async function PUT(
     const body = await request.json();
     const { channelIds = [] } = body;
 
+    const orgFilter = getOrgFilter(admin);
+
     // Get user info
     const userRef = doc(db, 'users', userId);
     const userDoc = await getDoc(userRef);
@@ -70,14 +91,41 @@ export async function PUT(
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
+    // Check org access for the user
     const userData = userDoc.data();
+    if (userData.organizationId) {
+      const denied = requireOrgAccess(admin, userData.organizationId);
+      if (denied) return denied;
+    }
 
-    // Get current channel memberships
+    // Verify all requested channels belong to the org (for org_admin)
+    if (orgFilter) {
+      for (const channelId of channelIds) {
+        const channelDoc = await getDoc(doc(db, 'channels', channelId));
+        if (channelDoc.exists() && channelDoc.data().organizationId !== orgFilter) {
+          return NextResponse.json(
+            { error: `Channel ${channelId} does not belong to your organization` },
+            { status: 403 }
+          );
+        }
+      }
+    }
+
+    // Get current channel memberships (scoped to org if needed)
     const channelsRef = collection(db, 'channels');
-    const currentMembershipsQuery = query(
-      channelsRef,
-      where('memberIds', 'array-contains', userId)
-    );
+    let currentMembershipsQuery;
+    if (orgFilter) {
+      currentMembershipsQuery = query(
+        channelsRef,
+        where('memberIds', 'array-contains', userId),
+        where('organizationId', '==', orgFilter)
+      );
+    } else {
+      currentMembershipsQuery = query(
+        channelsRef,
+        where('memberIds', 'array-contains', userId)
+      );
+    }
     const currentMemberships = await getDocs(currentMembershipsQuery);
     const currentChannelIds = currentMemberships.docs.map((doc) => doc.id);
 
@@ -97,14 +145,12 @@ export async function PUT(
       const channelDoc = await getDoc(channelRef);
 
       if (channelDoc.exists()) {
-        // Update channel memberIds and memberCount
         await updateDoc(channelRef, {
           memberIds: arrayUnion(userId),
           memberCount: increment(1),
           updatedAt: serverTimestamp(),
         });
 
-        // Add member to subcollection
         const memberRef = doc(channelRef, 'members', userId);
         await setDoc(memberRef, {
           userId,
@@ -122,14 +168,12 @@ export async function PUT(
       const channelDoc = await getDoc(channelRef);
 
       if (channelDoc.exists()) {
-        // Update channel memberIds and memberCount
         await updateDoc(channelRef, {
           memberIds: arrayRemove(userId),
           memberCount: increment(-1),
           updatedAt: serverTimestamp(),
         });
 
-        // Remove member from subcollection
         const memberRef = doc(channelRef, 'members', userId);
         await deleteDoc(memberRef);
       }

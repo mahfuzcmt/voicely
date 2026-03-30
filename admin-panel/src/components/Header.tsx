@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import toast from 'react-hot-toast';
-import { LogOut, User } from 'lucide-react';
+import { LogOut, User, Building2 } from 'lucide-react';
 import { JwtPayload } from '@/lib/auth';
 
 interface HeaderProps {
@@ -37,8 +37,14 @@ export default function Header({ admin }: HeaderProps) {
             <User className="w-4 h-4" />
             <span>{admin.email}</span>
             <span className="px-2 py-1 bg-primary-100 text-primary-700 rounded text-xs font-medium">
-              {admin.role}
+              {admin.role === 'super_admin' ? 'Super Admin' : 'Org Admin'}
             </span>
+            {admin.organizationName && (
+              <span className="flex items-center gap-1 px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs font-medium">
+                <Building2 className="w-3 h-3" />
+                {admin.organizationName}
+              </span>
+            )}
           </div>
           <button
             onClick={handleLogout}

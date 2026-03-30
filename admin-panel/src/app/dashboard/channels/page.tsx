@@ -2,11 +2,18 @@
 
 import { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
-import { Plus, Pencil, Trash2, Users, Lock, Unlock, Search, BarChart3, Power, PowerOff } from 'lucide-react';
+import { Plus, Pencil, Trash2, Users, Lock, Unlock, Search, BarChart3, Power, PowerOff, AlertCircle } from 'lucide-react';
 import { Channel } from '@/types';
 import ChannelModal from '@/components/ChannelModal';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import Link from 'next/link';
+
+interface Limits {
+  currentUsers: number;
+  maxUsers: number;
+  currentChannels: number;
+  maxChannels: number;
+}
 
 export default function ChannelsPage() {
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -18,6 +25,7 @@ export default function ChannelsPage() {
     open: false,
     channel: null,
   });
+  const [limits, setLimits] = useState<Limits | null>(null);
 
   useEffect(() => {
     fetchChannels();
@@ -28,6 +36,7 @@ export default function ChannelsPage() {
       const res = await fetch('/api/channels');
       const data = await res.json();
       setChannels(data.channels || []);
+      if (data.limits) setLimits(data.limits);
     } catch (error) {
       toast.error('Failed to fetch channels');
     } finally {
@@ -76,13 +85,16 @@ export default function ChannelsPage() {
         body: JSON.stringify(data),
       });
 
-      if (!res.ok) throw new Error('Failed to save');
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to save channel');
+      }
 
       toast.success(editingChannel ? 'Channel updated' : 'Channel created');
       setModalOpen(false);
       fetchChannels();
-    } catch (error) {
-      toast.error('Failed to save channel');
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to save channel');
     }
   };
 
@@ -110,17 +122,38 @@ export default function ChannelsPage() {
       channel.description?.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
+  const atChannelLimit = limits ? limits.currentChannels >= limits.maxChannels : false;
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Channels</h1>
-          <p className="text-gray-500 mt-1">Manage your PTT channels</p>
+          <p className="text-gray-500 mt-1">
+            Manage your PTT channels
+            {limits && (
+              <span className="ml-2 text-sm">
+                ({limits.currentChannels}/{limits.maxChannels} channels)
+              </span>
+            )}
+          </p>
         </div>
-        <button onClick={handleCreate} className="btn btn-primary flex items-center gap-2">
-          <Plus className="w-4 h-4" />
-          Create Channel
-        </button>
+        <div className="flex items-center gap-3">
+          {atChannelLimit && (
+            <span className="flex items-center gap-1 text-sm text-red-600">
+              <AlertCircle className="w-4 h-4" />
+              Channel limit reached
+            </span>
+          )}
+          <button
+            onClick={handleCreate}
+            disabled={atChannelLimit}
+            className="btn btn-primary flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Plus className="w-4 h-4" />
+            Create Channel
+          </button>
+        </div>
       </div>
 
       <div className="card mb-6">

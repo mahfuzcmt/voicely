@@ -9,6 +9,13 @@ import {
 } from 'firebase/firestore';
 import { getAdminFromToken } from '@/lib/auth';
 import { getAdminAuth } from '@/lib/firebase-admin';
+import { requireOrgAccess } from '@/lib/authorization';
+
+// Convert phone number to email format (same as mobile app)
+function phoneToEmail(phoneNumber: string): string {
+  const cleanPhone = phoneNumber.replace(/[^\d+]/g, '');
+  return `${cleanPhone}@voicely.app`;
+}
 
 // GET single user
 export async function GET(
@@ -29,13 +36,20 @@ export async function GET(
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
+    // Check org access
+    const userData = userDoc.data();
+    if (userData.organizationId) {
+      const denied = requireOrgAccess(admin, userData.organizationId);
+      if (denied) return denied;
+    }
+
     return NextResponse.json({
       user: {
         id: userDoc.id,
-        ...userDoc.data(),
-        lastSeen: userDoc.data().lastSeen?.toDate?.() || null,
-        createdAt: userDoc.data().createdAt?.toDate?.() || null,
-        updatedAt: userDoc.data().updatedAt?.toDate?.() || null,
+        ...userData,
+        lastSeen: userData.lastSeen?.toDate?.() || null,
+        createdAt: userData.createdAt?.toDate?.() || null,
+        updatedAt: userData.updatedAt?.toDate?.() || null,
       },
     });
   } catch (error) {
@@ -45,12 +59,6 @@ export async function GET(
       { status: 500 }
     );
   }
-}
-
-// Convert phone number to email format (same as mobile app)
-function phoneToEmail(phoneNumber: string): string {
-  const cleanPhone = phoneNumber.replace(/[^\d+]/g, '');
-  return `${cleanPhone}@voicely.app`;
 }
 
 // PUT update user
@@ -75,7 +83,13 @@ export async function PUT(
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
+    // Check org access
     const userData = userDoc.data();
+    if (userData.organizationId) {
+      const denied = requireOrgAccess(admin, userData.organizationId);
+      if (denied) return denied;
+    }
+
     const adminAuth = getAdminAuth();
 
     // Check if user exists in Firebase Auth
@@ -104,17 +118,13 @@ export async function PUT(
       const authEmail = phoneToEmail(phone);
       const name = displayName?.trim() || userData.displayName;
 
-      // Create user in Firebase Auth with the same UID
       await adminAuth.createUser({
         uid: id,
         email: authEmail,
         password: password,
         displayName: name,
       });
-
-      console.log(`Created Firebase Auth user for existing Firestore user: ${id}`);
     } else {
-      // User exists in Auth, update if needed
       const authUpdateData: { password?: string; displayName?: string } = {};
 
       if (password?.trim()) {
@@ -180,12 +190,18 @@ export async function DELETE(
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
+    // Check org access
+    const userData = userDoc.data();
+    if (userData.organizationId) {
+      const denied = requireOrgAccess(admin, userData.organizationId);
+      if (denied) return denied;
+    }
+
     // Delete from Firebase Auth
     const adminAuth = getAdminAuth();
     try {
       await adminAuth.deleteUser(id);
     } catch (authError: any) {
-      // User might not exist in Auth (created before this fix)
       if (authError.code !== 'auth/user-not-found') {
         throw authError;
       }

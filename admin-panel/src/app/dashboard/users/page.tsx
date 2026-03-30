@@ -2,11 +2,18 @@
 
 import { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
-import { Plus, Pencil, Trash2, Radio, Search, UserCheck, UserX } from 'lucide-react';
+import { Plus, Pencil, Trash2, Radio, Search, AlertCircle } from 'lucide-react';
 import { User, Channel } from '@/types';
 import UserModal from '@/components/UserModal';
 import AssignChannelModal from '@/components/AssignChannelModal';
 import ConfirmDialog from '@/components/ConfirmDialog';
+
+interface Limits {
+  currentUsers: number;
+  maxUsers: number;
+  currentChannels: number;
+  maxChannels: number;
+}
 
 export default function UsersPage() {
   const [users, setUsers] = useState<User[]>([]);
@@ -22,6 +29,7 @@ export default function UsersPage() {
     open: false,
     user: null,
   });
+  const [limits, setLimits] = useState<Limits | null>(null);
 
   useEffect(() => {
     fetchChannels();
@@ -38,6 +46,7 @@ export default function UsersPage() {
       const res = await fetch(url);
       const data = await res.json();
       setUsers(data.users || []);
+      if (data.limits) setLimits(data.limits);
     } catch (error) {
       toast.error('Failed to fetch users');
     } finally {
@@ -161,17 +170,38 @@ export default function UsersPage() {
       user.email?.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
+  const atUserLimit = limits ? limits.currentUsers >= limits.maxUsers : false;
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Users</h1>
-          <p className="text-gray-500 mt-1">Manage app users and their channel assignments</p>
+          <p className="text-gray-500 mt-1">
+            Manage app users and their channel assignments
+            {limits && (
+              <span className="ml-2 text-sm">
+                ({limits.currentUsers}/{limits.maxUsers} users)
+              </span>
+            )}
+          </p>
         </div>
-        <button onClick={handleCreate} className="btn btn-primary flex items-center gap-2">
-          <Plus className="w-4 h-4" />
-          Create User
-        </button>
+        <div className="flex items-center gap-3">
+          {atUserLimit && (
+            <span className="flex items-center gap-1 text-sm text-red-600">
+              <AlertCircle className="w-4 h-4" />
+              User limit reached
+            </span>
+          )}
+          <button
+            onClick={handleCreate}
+            disabled={atUserLimit}
+            className="btn btn-primary flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Plus className="w-4 h-4" />
+            Create User
+          </button>
+        </div>
       </div>
 
       <div className="card mb-6">

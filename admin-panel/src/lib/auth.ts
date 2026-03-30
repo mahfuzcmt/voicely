@@ -10,6 +10,8 @@ export interface JwtPayload {
   adminId: string;
   email: string;
   role: string;
+  organizationId: string | null;
+  organizationName: string | null;
 }
 
 export async function hashPassword(password: string): Promise<string> {
@@ -26,6 +28,8 @@ export function generateToken(admin: Admin): string {
       adminId: admin.id,
       email: admin.email,
       role: admin.role,
+      organizationId: admin.organizationId || null,
+      organizationName: admin.organizationName || null,
     },
     JWT_SECRET,
     { expiresIn: '7d' }

@@ -1,8 +1,20 @@
+export interface Organization {
+  id: string;
+  name: string;
+  packageMaxUsers: number;
+  packageMaxChannels: number;
+  orgAdminId: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface Admin {
   id: string;
   email: string;
   displayName: string;
-  role: 'super_admin' | 'admin';
+  role: 'super_admin' | 'org_admin';
+  organizationId?: string | null;
+  organizationName?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -14,6 +26,7 @@ export interface User {
   email?: string;
   photoUrl?: string;
   status: 'online' | 'away' | 'busy' | 'offline';
+  organizationId: string;
   lastSeen?: Date;
   createdAt?: Date;
   updatedAt?: Date;
@@ -30,6 +43,7 @@ export interface Channel {
   memberCount: number;
   memberIds: string[];
   audioArchiveEnabled?: boolean;
+  organizationId: string;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -48,6 +62,9 @@ export interface DashboardStats {
   totalChannels: number;
   activeUsers: number;
   totalMessages: number;
+  organizationName?: string;
+  packageMaxUsers?: number;
+  packageMaxChannels?: number;
 }
 
 // Usage statistics types
