@@ -2,13 +2,18 @@
 
 import { useState, useEffect } from 'react';
 import { X, Eye, EyeOff } from 'lucide-react';
-import { User } from '@/types';
+import { User, Organization } from '@/types';
 
 interface UserModalProps {
   open: boolean;
   onClose: () => void;
-  onSave: (data: Partial<User> & { password?: string }) => void;
+  onSave: (data: Partial<User> & { password?: string; organizationId?: string }) => void;
   user: User | null;
+}
+
+interface AdminInfo {
+  role: string;
+  organizationId: string | null;
 }
 
 export default function UserModal({
@@ -23,7 +28,41 @@ export default function UserModal({
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [status, setStatus] = useState<User['status']>('offline');
+  const [organizationId, setOrganizationId] = useState('');
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
+  const [adminInfo, setAdminInfo] = useState<AdminInfo | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingOrgs, setLoadingOrgs] = useState(false);
+
+  // Fetch admin info and organizations on mount
+  useEffect(() => {
+    const fetchAdminInfo = async () => {
+      try {
+        const res = await fetch('/api/auth/me');
+        if (res.ok) {
+          const data = await res.json();
+          setAdminInfo(data);
+
+          // If super_admin, fetch organizations
+          if (data.role === 'super_admin') {
+            setLoadingOrgs(true);
+            const orgsRes = await fetch('/api/organizations');
+            if (orgsRes.ok) {
+              const orgsData = await orgsRes.json();
+              setOrganizations(orgsData.organizations || []);
+            }
+            setLoadingOrgs(false);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to fetch admin info:', error);
+      }
+    };
+
+    if (open) {
+      fetchAdminInfo();
+    }
+  }, [open]);
 
   useEffect(() => {
     if (user) {
@@ -32,14 +71,21 @@ export default function UserModal({
       setEmail(user.email || '');
       setPassword('');
       setStatus(user.status);
+      setOrganizationId(user.organizationId || '');
     } else {
       setDisplayName('');
       setPhoneNumber('');
       setEmail('');
       setPassword('');
       setStatus('offline');
+      // For org_admin, organization is auto-assigned; for super_admin, select first org
+      if (adminInfo?.role === 'super_admin' && organizations.length > 0) {
+        setOrganizationId(organizations[0].id);
+      } else {
+        setOrganizationId('');
+      }
     }
-  }, [user, open]);
+  }, [user, open, adminInfo, organizations]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -52,11 +98,15 @@ export default function UserModal({
         email: email || undefined,
         password: password || undefined,
         status,
+        organizationId: organizationId || undefined,
       });
     } finally {
       setLoading(false);
     }
   };
+
+  const isSuperAdmin = adminInfo?.role === 'super_admin';
+  const needsOrgSelection = isSuperAdmin && !user; // Only for creating new users as super_admin
 
   if (!open) return null;
 
@@ -162,6 +212,36 @@ export default function UserModal({
             </select>
           </div>
 
+          {needsOrgSelection && (
+            <div>
+              <label htmlFor="organizationId" className="form-label">
+                Organization *
+              </label>
+              {loadingOrgs ? (
+                <div className="form-input bg-gray-50 text-gray-500">Loading organizations...</div>
+              ) : organizations.length === 0 ? (
+                <div className="form-input bg-red-50 text-red-600">
+                  No organizations found. Please create an organization first.
+                </div>
+              ) : (
+                <select
+                  id="organizationId"
+                  value={organizationId}
+                  onChange={(e) => setOrganizationId(e.target.value)}
+                  className="form-input"
+                  required
+                >
+                  <option value="">Select an organization</option>
+                  {organizations.map((org) => (
+                    <option key={org.id} value={org.id}>
+                      {org.name} ({org.currentUsers || 0}/{org.packageMaxUsers} users)
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          )}
+
           <div className="flex gap-3 pt-4">
             <button
               type="button"
@@ -172,7 +252,13 @@ export default function UserModal({
             </button>
             <button
               type="submit"
-              disabled={loading || !displayName.trim() || !phoneNumber.trim() || (!user && !password.trim())}
+              disabled={
+                loading ||
+                !displayName.trim() ||
+                !phoneNumber.trim() ||
+                (!user && !password.trim()) ||
+                (needsOrgSelection && !organizationId)
+              }
               className="btn btn-primary flex-1"
             >
               {loading ? 'Saving...' : user ? 'Update' : 'Create'}

@@ -18,11 +18,8 @@ import '../../../ptt/presentation/widgets/live_ptt_button.dart';
 import '../../../ptt/presentation/widgets/ptt_button.dart';
 import '../../domain/models/channel_model.dart';
 
-// Provider for messages stream
-final channelMessagesProvider = StreamProvider.family<List<MessageModel>, String>((ref, channelId) {
-  final messageRepo = ref.watch(messageRepositoryProvider);
-  return messageRepo.getChannelMessages(channelId);
-});
+// REMOVED: channelMessagesProvider - was causing excessive Firestore reads
+// Messages are fetched on-demand via getLastAudioMessage() instead
 
 class ChannelDetailScreen extends ConsumerStatefulWidget {
   final String channelId;

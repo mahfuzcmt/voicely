@@ -35,6 +35,19 @@ class NativeAudioService {
     }
   }
 
+  /// Configure audio specifically for BROADCASTING (microphone input focus)
+  /// Call this BEFORE getUserMedia to ensure microphone is properly configured
+  static Future<bool> setAudioModeForBroadcasting() async {
+    try {
+      final result = await _channel.invokeMethod('setAudioModeForBroadcasting');
+      debugPrint('NativeAudio: setAudioModeForBroadcasting = $result');
+      return result == true;
+    } catch (e) {
+      debugPrint('NativeAudio: Error setting broadcasting mode: $e');
+      return false;
+    }
+  }
+
   /// Get current audio state for debugging
   static Future<Map<String, dynamic>?> getAudioState() async {
     try {

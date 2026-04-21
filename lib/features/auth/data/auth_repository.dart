@@ -264,6 +264,11 @@ class AuthRepository {
     await _usersRef.doc(user.id).update(user.toFirestore());
   }
 
+  // Cache for user status to avoid redundant writes
+  static UserStatus? _cachedUserStatus;
+  static DateTime? _lastStatusUpdate;
+  static const _statusUpdateDebounce = Duration(seconds: 30);
+
   Future<void> _updateUserStatus(String userId, UserStatus status) async {
     await _usersRef.doc(userId).update({
       'status': status.name,
@@ -271,11 +276,26 @@ class AuthRepository {
     });
   }
 
+  /// Update user status with debouncing to reduce Firestore writes
+  /// Only writes if status changed OR 30+ seconds since last update
   Future<void> updateUserStatus(UserStatus status) async {
     final userId = _auth.currentUser?.uid;
-    if (userId != null) {
-      await _updateUserStatus(userId, status);
+    if (userId == null) return;
+
+    final now = DateTime.now();
+
+    // Skip if same status and within debounce window
+    if (_cachedUserStatus == status &&
+        _lastStatusUpdate != null &&
+        now.difference(_lastStatusUpdate!) < _statusUpdateDebounce) {
+      Logger.d('Status update debounced (same status within 30s)');
+      return;
     }
+
+    // Update cache and write
+    _cachedUserStatus = status;
+    _lastStatusUpdate = now;
+    await _updateUserStatus(userId, status);
   }
 
   Future<void> resetPassword(String phoneNumber) async {
@@ -290,20 +310,32 @@ class AuthRepository {
     });
   }
 
+  // Cache for FCM token to avoid redundant writes
+  static String? _cachedFcmToken;
+
   /// Save FCM token to user document for push notifications
+  /// OPTIMIZED: Only writes if token has changed (saves Firestore writes)
   Future<void> saveFcmToken() async {
     final userId = _auth.currentUser?.uid;
     if (userId == null) return;
 
     try {
       final token = await FirebaseMessaging.instance.getToken();
-      if (token != null) {
-        await _usersRef.doc(userId).update({
-          'fcmToken': token,
-          'fcmTokenUpdatedAt': FieldValue.serverTimestamp(),
-        });
-        Logger.d('Saved FCM token for user $userId');
+      if (token == null) return;
+
+      // Skip write if token hasn't changed
+      if (_cachedFcmToken == token) {
+        Logger.d('FCM token unchanged, skipping write');
+        return;
       }
+
+      // Update cache and write to Firestore
+      _cachedFcmToken = token;
+      await _usersRef.doc(userId).update({
+        'fcmToken': token,
+        'fcmTokenUpdatedAt': FieldValue.serverTimestamp(),
+      });
+      Logger.d('Saved FCM token for user $userId');
     } catch (e) {
       Logger.e('Failed to save FCM token', error: e);
     }

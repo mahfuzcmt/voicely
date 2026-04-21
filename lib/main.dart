@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/router/app_router.dart';
 import 'core/services/background_audio_service.dart';
 import 'core/services/fcm_ptt_service.dart';
+import 'core/services/hardware_ptt_service.dart';
 import 'core/theme/app_theme.dart';
 import 'features/ptt/data/websocket_signaling_service.dart';
 import 'firebase_options.dart';
@@ -40,6 +41,9 @@ Future<void> main() async {
   // Initialize background audio service
   final backgroundService = BackgroundAudioService();
   await backgroundService.initialize();
+
+  // Initialize hardware PTT button service (for Chinese PTT devices)
+  await HardwarePttService.init();
 
   // Initialize local notifications for showing alerts when app is in background
   await _initializeLocalNotifications();

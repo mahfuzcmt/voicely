@@ -37,18 +37,22 @@ final userChannelsProvider = FutureProvider<List<ChannelModel>>((ref) async {
   return channelRepo.getUserChannelsOnce(user.uid);
 });
 
-// Single channel provider - for channel detail screen
+// Single channel provider - ONE-TIME fetch (saves Firestore reads)
+// Use ref.invalidate(channelProvider(channelId)) to refresh
+// CHANGED from StreamProvider to FutureProvider to reduce Firestore reads
 final channelProvider =
-    StreamProvider.family<ChannelModel?, String>((ref, channelId) {
+    FutureProvider.autoDispose.family<ChannelModel?, String>((ref, channelId) async {
   final channelRepo = ref.watch(channelRepositoryProvider);
-  return channelRepo.channelStream(channelId);
+  return channelRepo.getChannelById(channelId);
 });
 
-// Channel members provider
+// Channel members provider - ONE-TIME fetch (saves Firestore reads)
+// Use ref.invalidate(channelMembersProvider(channelId)) to refresh
+// CHANGED from StreamProvider to FutureProvider to reduce Firestore reads
 final channelMembersProvider =
-    StreamProvider.family<List<ChannelMember>, String>((ref, channelId) {
+    FutureProvider.autoDispose.family<List<ChannelMember>, String>((ref, channelId) async {
   final channelRepo = ref.watch(channelRepositoryProvider);
-  return channelRepo.getChannelMembers(channelId);
+  return channelRepo.getChannelMembersOnce(channelId);
 });
 
 // Auth state notifier for login/logout actions

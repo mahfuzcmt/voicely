@@ -457,22 +457,53 @@ class LiveStreamingService {
     if (_localStream != null) return true;
 
     try {
+      debugPrint('LiveStream: ========== INITIALIZING LOCAL STREAM FOR BROADCAST ==========');
+
+      // CRITICAL: Configure audio mode for BROADCASTING (microphone focus) BEFORE getting microphone
+      // This ensures the microphone is properly routed, unmuted, and captured
+      debugPrint('LiveStream: Setting audio mode for BROADCASTING (microphone focus)...');
+      try {
+        final modeSet = await NativeAudioService.setAudioModeForBroadcasting();
+        debugPrint('LiveStream: Audio mode for broadcasting: $modeSet');
+      } catch (e) {
+        debugPrint('LiveStream: Warning - failed to set broadcasting audio mode: $e');
+        // Try fallback to voice chat mode
+        try {
+          final fallbackSet = await NativeAudioService.setAudioModeForVoiceChat();
+          debugPrint('LiveStream: Fallback voice chat mode: $fallbackSet');
+        } catch (e2) {
+          debugPrint('LiveStream: Fallback also failed: $e2');
+        }
+      }
+
       // Check for Bluetooth microphone and start SCO if available
       // This must be done BEFORE getUserMedia() to make Bluetooth mic available
-      final bluetoothStatus = await NativeAudioService.isBluetoothAudioConnected();
-      final isBluetoothConnected = bluetoothStatus['isConnected'] as bool? ?? false;
+      bool isBluetoothConnected = false;
+      try {
+        final bluetoothStatus = await NativeAudioService.isBluetoothAudioConnected();
+        isBluetoothConnected = bluetoothStatus['isConnected'] as bool? ?? false;
+        debugPrint('LiveStream: Bluetooth connected: $isBluetoothConnected');
+      } catch (e) {
+        debugPrint('LiveStream: Error checking Bluetooth: $e');
+      }
 
       if (isBluetoothConnected) {
         debugPrint('LiveStream: Bluetooth connected, starting SCO for microphone...');
-        final scoResult = await NativeAudioService.startBluetoothScoForMic();
-        final scoSuccess = scoResult['success'] as bool? ?? false;
-        if (scoSuccess) {
-          debugPrint('LiveStream: Bluetooth SCO started - using Bluetooth mic: ${scoResult['deviceName']}');
-          // Give SCO a moment to establish
-          await Future.delayed(const Duration(milliseconds: 200));
-        } else {
-          debugPrint('LiveStream: Bluetooth SCO failed, will use built-in mic: ${scoResult['reason']}');
+        try {
+          final scoResult = await NativeAudioService.startBluetoothScoForMic();
+          final scoSuccess = scoResult['success'] as bool? ?? false;
+          if (scoSuccess) {
+            debugPrint('LiveStream: Bluetooth SCO started - using Bluetooth mic: ${scoResult['deviceName']}');
+            // Give SCO a moment to establish
+            await Future.delayed(const Duration(milliseconds: 200));
+          } else {
+            debugPrint('LiveStream: Bluetooth SCO failed, will use built-in mic: ${scoResult['reason']}');
+          }
+        } catch (e) {
+          debugPrint('LiveStream: Error starting Bluetooth SCO: $e');
         }
+      } else {
+        debugPrint('LiveStream: No Bluetooth, using built-in microphone');
       }
 
       // Try with full audio constraints first
@@ -488,23 +519,48 @@ class LiveStreamingService {
         'video': false,
       };
 
+      debugPrint('LiveStream: Getting user media with constraints: $constraints');
+
       try {
         _localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        debugPrint('LiveStream: Got local stream with ${_localStream!.getAudioTracks().length} audio tracks');
+
+        // Log track details
+        for (final track in _localStream!.getAudioTracks()) {
+          debugPrint('LiveStream: Audio track: id=${track.id}, enabled=${track.enabled}, muted=${track.muted}');
+          // Ensure track is enabled
+          if (!track.enabled) {
+            track.enabled = true;
+            debugPrint('LiveStream: Enabled audio track ${track.id}');
+          }
+        }
+
         Logger.d('Local audio stream initialized with full constraints');
         return true;
       } catch (e) {
         // Fallback to simpler constraints if device doesn't support all options
         Logger.w('Full audio constraints failed, trying fallback: $e');
+        debugPrint('LiveStream: Full constraints failed: $e, trying simple constraints');
+
         final fallbackConstraints = {
           'audio': true,
           'video': false,
         };
         _localStream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+        debugPrint('LiveStream: Got local stream (fallback) with ${_localStream!.getAudioTracks().length} audio tracks');
+
+        // Ensure tracks are enabled
+        for (final track in _localStream!.getAudioTracks()) {
+          track.enabled = true;
+          debugPrint('LiveStream: Enabled audio track ${track.id}');
+        }
+
         Logger.d('Local audio stream initialized with fallback constraints');
         return true;
       }
     } catch (e) {
       Logger.e('Failed to initialize local stream', error: e);
+      debugPrint('LiveStream: CRITICAL ERROR initializing local stream: $e');
       _updateState(LiveStreamingState.error);
       return false;
     }

@@ -4,6 +4,9 @@ export interface Organization {
   packageMaxUsers: number;
   packageMaxChannels: number;
   orgAdminId: string;
+  orgAdminEmail?: string;
+  currentUsers?: number;
+  currentChannels?: number;
   createdAt: Date;
   updatedAt: Date;
 }

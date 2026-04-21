@@ -99,19 +99,25 @@ class MessageRepository {
     );
 
     // Log usage for reporting (fire-and-forget, don't block message sending)
-    _logVoiceUsage(
-      channelId: channelId,
-      senderId: senderId,
-      senderName: senderName,
-      durationSeconds: durationSeconds,
-      messageId: message.id,
-    );
+    // NOTE: Set to false to disable usage logging and save Firestore writes
+    // When scaling to 1000+ users, consider moving this to Cloud Functions
+    const bool enableUsageLogging = true;
+    if (enableUsageLogging) {
+      _logVoiceUsage(
+        channelId: channelId,
+        senderId: senderId,
+        senderName: senderName,
+        durationSeconds: durationSeconds,
+        messageId: message.id,
+      );
+    }
 
     return message;
   }
 
   /// Log voice usage for reporting purposes
-  /// This creates an entry in usage_logs and updates aggregated stats
+  /// OPTIMIZED: Uses a single batched write instead of 6 separate writes
+  /// This reduces Firestore writes from 6 to 1 per voice message
   Future<void> _logVoiceUsage({
     required String channelId,
     required String senderId,
@@ -119,17 +125,19 @@ class MessageRepository {
     required int durationSeconds,
     required String messageId,
   }) async {
-    debugPrint('UsageLog: Starting to log voice usage...');
-    debugPrint('UsageLog: channelId=$channelId, senderId=$senderId, duration=${durationSeconds}s');
+    debugPrint('UsageLog: Batched log - channelId=$channelId, senderId=$senderId, duration=${durationSeconds}s');
 
     try {
       final now = DateTime.now();
       final dateKey = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
       final monthKey = '${now.year}-${now.month.toString().padLeft(2, '0')}';
 
+      // Use a single WriteBatch to combine all 6 writes into 1 Firestore operation
+      final batch = _firestore.batch();
+
       // 1. Create usage log entry
-      debugPrint('UsageLog: Creating usage log entry...');
-      await _usageLogsRef.add({
+      final usageLogRef = _usageLogsRef.doc();
+      batch.set(usageLogRef, {
         'channelId': channelId,
         'senderId': senderId,
         'senderName': senderName,
@@ -139,11 +147,10 @@ class MessageRepository {
         'date': dateKey,
         'month': monthKey,
       });
-      debugPrint('UsageLog: Usage log entry created');
 
-      // 2. Update user daily stats (using increment for atomic updates)
+      // 2. Update user daily stats
       final userDailyRef = _userStatsRef.doc(senderId).collection('daily').doc(dateKey);
-      await userDailyRef.set({
+      batch.set(userDailyRef, {
         'userId': senderId,
         'userName': senderName,
         'date': dateKey,
@@ -154,7 +161,7 @@ class MessageRepository {
 
       // 3. Update user monthly stats
       final userMonthlyRef = _userStatsRef.doc(senderId).collection('monthly').doc(monthKey);
-      await userMonthlyRef.set({
+      batch.set(userMonthlyRef, {
         'userId': senderId,
         'userName': senderName,
         'month': monthKey,
@@ -165,7 +172,7 @@ class MessageRepository {
 
       // 4. Update channel daily stats
       final channelDailyRef = _channelStatsRef.doc(channelId).collection('daily').doc(dateKey);
-      await channelDailyRef.set({
+      batch.set(channelDailyRef, {
         'channelId': channelId,
         'date': dateKey,
         'totalVoices': FieldValue.increment(1),
@@ -175,7 +182,7 @@ class MessageRepository {
 
       // 5. Update channel monthly stats
       final channelMonthlyRef = _channelStatsRef.doc(channelId).collection('monthly').doc(monthKey);
-      await channelMonthlyRef.set({
+      batch.set(channelMonthlyRef, {
         'channelId': channelId,
         'month': monthKey,
         'totalVoices': FieldValue.increment(1),
@@ -183,9 +190,9 @@ class MessageRepository {
         'lastActivity': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-      // 6. Update channel user-specific stats (which user sent how much in this channel)
+      // 6. Update channel user-specific stats
       final channelUserRef = _channelStatsRef.doc(channelId).collection('users').doc(senderId);
-      await channelUserRef.set({
+      batch.set(channelUserRef, {
         'userId': senderId,
         'userName': senderName,
         'channelId': channelId,
@@ -194,7 +201,9 @@ class MessageRepository {
         'lastActivity': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-      debugPrint('UsageLog: Logged voice usage - user: $senderId, channel: $channelId, duration: ${durationSeconds}s');
+      // Execute all writes in a single batch operation
+      await batch.commit();
+      debugPrint('UsageLog: Batched write complete - saved 5 Firestore operations');
     } catch (e) {
       // Don't throw - usage logging shouldn't break message sending
       debugPrint('UsageLog: Error logging usage: $e');

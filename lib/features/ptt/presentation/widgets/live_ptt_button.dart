@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../core/services/hardware_ptt_service.dart';
 import '../../../../core/services/native_audio_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
@@ -36,6 +37,9 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
   Timer? _listenerBatchTimer;
   static const Duration _listenerBatchDelay = Duration(milliseconds: 800);
 
+  // Hardware PTT button subscription
+  StreamSubscription<PttEvent>? _hardwarePttSubscription;
+
   @override
   void initState() {
     super.initState();
@@ -55,6 +59,74 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
         }
       };
     });
+
+    // Set up hardware PTT button listener (for Chinese PTT devices)
+    _setupHardwarePttListener();
+  }
+
+  /// Set up hardware PTT button listener for Chinese PTT devices
+  void _setupHardwarePttListener() {
+    _hardwarePttSubscription = HardwarePttService.pttEvents.listen((event) {
+      if (!mounted) return;
+
+      debugPrint('LivePttButton: Hardware PTT event: $event');
+
+      if (event.type == PttEventType.down) {
+        _onHardwarePttDown();
+      } else {
+        _onHardwarePttUp();
+      }
+    });
+    debugPrint('LivePttButton: Hardware PTT listener set up');
+  }
+
+  /// Handle hardware PTT button press - start broadcasting
+  Future<void> _onHardwarePttDown() async {
+    final session = ref.read(livePttSessionProvider(widget.channelId));
+
+    // If already broadcasting, do nothing
+    if (session.isBroadcasting || session.state == LivePttState.requestingFloor) {
+      return;
+    }
+
+    // Check if can broadcast
+    if (!session.canBroadcast) {
+      if (session.isListening) {
+        // Someone else is speaking, provide haptic feedback
+        HapticFeedback.vibrate();
+      }
+      return;
+    }
+
+    // Start broadcasting
+    HapticFeedback.heavyImpact();
+    _pulseController.repeat(reverse: true);
+
+    final success = await ref
+        .read(livePttSessionProvider(widget.channelId).notifier)
+        .startBroadcasting();
+
+    if (!success && mounted) {
+      _pulseController.stop();
+      _pulseController.reset();
+      HapticFeedback.vibrate(); // Error feedback
+    }
+  }
+
+  /// Handle hardware PTT button release - stop broadcasting
+  Future<void> _onHardwarePttUp() async {
+    final session = ref.read(livePttSessionProvider(widget.channelId));
+
+    // Only stop if we are currently broadcasting
+    if (session.isBroadcasting) {
+      HapticFeedback.lightImpact();
+      _pulseController.stop();
+      _pulseController.reset();
+
+      await ref
+          .read(livePttSessionProvider(widget.channelId).notifier)
+          .stopBroadcasting();
+    }
   }
 
   @override
@@ -64,6 +136,9 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
     _listenerBatchTimer?.cancel();
     _pendingListenerNames.clear();
     _pulseController.dispose();
+    // Cancel hardware PTT subscription
+    _hardwarePttSubscription?.cancel();
+    _hardwarePttSubscription = null;
     super.dispose();
   }
 
