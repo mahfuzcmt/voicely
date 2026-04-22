@@ -144,54 +144,63 @@ class _LivePttButtonState extends ConsumerState<LivePttButton>
 
   /// Toggle broadcasting on tap - tap to start, tap again to stop
   void _onTapToggle() async {
-    final session = ref.read(livePttSessionProvider(widget.channelId));
+    try {
+      final session = ref.read(livePttSessionProvider(widget.channelId));
 
-    // If currently broadcasting or requesting floor, stop
-    if (session.isBroadcasting || session.state == LivePttState.requestingFloor) {
-      HapticFeedback.lightImpact();
-      _pulseController.stop();
-      _pulseController.reset();
+      // If currently broadcasting or requesting floor, stop
+      if (session.isBroadcasting || session.state == LivePttState.requestingFloor) {
+        HapticFeedback.lightImpact();
+        _pulseController.stop();
+        _pulseController.reset();
 
-      await ref
-          .read(livePttSessionProvider(widget.channelId).notifier)
-          .stopBroadcasting();
-      return;
-    }
-
-    // Check if can broadcast
-    if (!session.canBroadcast) {
-      if (session.state == LivePttState.error) {
-        ref.read(livePttSessionProvider(widget.channelId).notifier).clearError();
-      } else if (!session.isConnected && !session.isConnecting) {
-        // Try to reconnect
-        ref.read(livePttSessionProvider(widget.channelId).notifier).reconnect();
-        context.showSnackBar('Reconnecting...');
-      } else if (session.isListening) {
-        // Someone else is speaking
-        final speakerName = (session.currentSpeakerName?.isNotEmpty == true)
-            ? session.currentSpeakerName!
-            : 'Another user';
-        context.showSnackBar('$speakerName is speaking');
+        await ref
+            .read(livePttSessionProvider(widget.channelId).notifier)
+            .stopBroadcasting();
+        return;
       }
-      return;
-    }
 
-    // Start broadcasting
-    HapticFeedback.heavyImpact();
-    _pulseController.repeat(reverse: true);
+      // Check if can broadcast
+      if (!session.canBroadcast) {
+        if (session.state == LivePttState.error) {
+          ref.read(livePttSessionProvider(widget.channelId).notifier).clearError();
+        } else if (!session.isConnected && !session.isConnecting) {
+          // Try to reconnect
+          ref.read(livePttSessionProvider(widget.channelId).notifier).reconnect();
+          context.showSnackBar('Reconnecting...');
+        } else if (session.isListening) {
+          // Someone else is speaking
+          final speakerName = (session.currentSpeakerName?.isNotEmpty == true)
+              ? session.currentSpeakerName!
+              : 'Another user';
+          context.showSnackBar('$speakerName is speaking');
+        }
+        return;
+      }
 
-    final success = await ref
-        .read(livePttSessionProvider(widget.channelId).notifier)
-        .startBroadcasting();
+      // Start broadcasting
+      HapticFeedback.heavyImpact();
+      _pulseController.repeat(reverse: true);
 
-    if (!success && mounted) {
-      _pulseController.stop();
-      _pulseController.reset();
+      final success = await ref
+          .read(livePttSessionProvider(widget.channelId).notifier)
+          .startBroadcasting();
 
-      final errorSession = ref.read(livePttSessionProvider(widget.channelId));
-      if (errorSession.errorMessage != null) {
-        context.showSnackBar(errorSession.errorMessage!, isError: true);
-        ref.read(livePttSessionProvider(widget.channelId).notifier).clearError();
+      if (!success && mounted) {
+        _pulseController.stop();
+        _pulseController.reset();
+
+        final errorSession = ref.read(livePttSessionProvider(widget.channelId));
+        if (errorSession.errorMessage != null) {
+          context.showSnackBar(errorSession.errorMessage!, isError: true);
+          ref.read(livePttSessionProvider(widget.channelId).notifier).clearError();
+        }
+      }
+    } catch (e) {
+      debugPrint('LivePTT: Error in tap toggle: $e');
+      if (mounted) {
+        _pulseController.stop();
+        _pulseController.reset();
+        context.showSnackBar('Error: please try again', isError: true);
       }
     }
   }

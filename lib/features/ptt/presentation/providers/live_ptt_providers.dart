@@ -850,19 +850,28 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
 
     state = state.copyWith(state: LivePttState.requestingFloor);
 
-    final success = await _streamingService.startBroadcasting();
-    if (!success) {
+    try {
+      final success = await _streamingService.startBroadcasting();
+      if (!success) {
+        state = state.copyWith(
+          state: LivePttState.error,
+          errorMessage: 'Failed to start broadcasting',
+        );
+        return false;
+      }
+
+      // Start local recording for message archiving (non-blocking)
+      _startLocalRecording();
+
+      return true;
+    } catch (e) {
+      debugPrint('LivePTT: Exception during startBroadcasting: $e');
       state = state.copyWith(
         state: LivePttState.error,
-        errorMessage: 'Failed to start broadcasting',
+        errorMessage: 'Broadcasting error',
       );
       return false;
     }
-
-    // Start local recording for message archiving (non-blocking)
-    _startLocalRecording();
-
-    return true;
   }
 
   /// Stop broadcasting (PTT released)
@@ -871,7 +880,11 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       return;
     }
 
-    await _streamingService.stopBroadcasting();
+    try {
+      await _streamingService.stopBroadcasting();
+    } catch (e) {
+      debugPrint('LivePTT: Error stopping broadcast: $e');
+    }
     _stopBroadcastTimer();
 
     // Stop recording and upload (fire-and-forget)

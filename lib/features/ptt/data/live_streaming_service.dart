@@ -599,8 +599,14 @@ class LiveStreamingService {
       debugPrint('LiveStream: Local stream ready with ${_localStream!.getTracks().length} tracks');
     }
 
-    // Verify we have audio tracks
-    final audioTracks = _localStream!.getAudioTracks();
+    // Verify we have audio tracks (guard against race condition)
+    final localStream = _localStream;
+    if (localStream == null) {
+      Logger.e('Local stream became null after init');
+      _updateState(LiveStreamingState.error);
+      return false;
+    }
+    final audioTracks = localStream.getAudioTracks();
     if (audioTracks.isEmpty) {
       Logger.e('No audio tracks in local stream');
       _updateState(LiveStreamingState.error);
@@ -725,7 +731,25 @@ class LiveStreamingService {
       debugPrint('LiveStream: We got the floor, starting to broadcast');
       _isBroadcasting = true;
       _updateState(LiveStreamingState.broadcasting);
+
+      // Ensure audio tracks are enabled and re-initialize if needed
       _setLocalAudioEnabled(true);
+      // Verify tracks are actually capturing (guard against stale pre-initialized stream)
+      final stream = _localStream;
+      if (stream != null) {
+        final tracks = stream.getAudioTracks();
+        if (tracks.isEmpty) {
+          debugPrint('LiveStream: WARNING - No audio tracks at floor grant');
+        } else {
+          for (final t in tracks) {
+            if (!t.enabled) {
+              t.enabled = true;
+              debugPrint('LiveStream: Re-enabled audio track ${t.id}');
+            }
+          }
+        }
+      }
+
       _startStreamingToListeners();
     } else {
       // Someone else is speaking - prepare to receive (timeout already cancelled at method start)
@@ -843,12 +867,20 @@ class LiveStreamingService {
 
       // Note: Listener count will be emitted when ICE actually connects (in onIceConnectionState)
 
-      // Add local audio tracks
-      if (_localStream != null) {
-        for (final track in _localStream!.getTracks()) {
-          await pc.addTrack(track, _localStream!);
+      // Add local audio tracks (guard against null/disposed stream)
+      final stream = _localStream;
+      if (stream != null) {
+        final tracks = stream.getTracks();
+        for (final track in tracks) {
+          try {
+            await pc.addTrack(track, stream);
+          } catch (e) {
+            debugPrint('LiveStream: Error adding track ${track.id} for $listenerId: $e');
+          }
         }
-        debugPrint('LiveStream: Added ${_localStream!.getTracks().length} tracks to PC for $listenerId');
+        debugPrint('LiveStream: Added ${tracks.length} tracks to PC for $listenerId');
+      } else {
+        debugPrint('LiveStream: WARNING - No local stream when creating offer for $listenerId');
       }
 
       // Create offer
@@ -1197,46 +1229,58 @@ class LiveStreamingService {
 
     // Handle incoming tracks (for listeners)
     pc.onTrack = (RTCTrackEvent event) {
-      debugPrint('LiveStream: *** onTrack fired! ***');
-      debugPrint('LiveStream: Track kind: ${event.track.kind}, id: ${event.track.id}');
-      debugPrint('LiveStream: Track enabled: ${event.track.enabled}, muted: ${event.track.muted}');
-      debugPrint('LiveStream: Streams count: ${event.streams.length}');
+      try {
+        debugPrint('LiveStream: *** onTrack fired! ***');
+        debugPrint('LiveStream: Track kind: ${event.track.kind}, id: ${event.track.id}');
+        debugPrint('LiveStream: Track enabled: ${event.track.enabled}, muted: ${event.track.muted}');
+        debugPrint('LiveStream: Streams count: ${event.streams.length}');
 
-      // Update debug state
-      _onTrackFired = true;
-      _debugController.add((tracks: _audioTracksReceived, onTrack: true, ice: _iceState));
-
-      if (event.track.kind == 'audio') {
-        // Update debug track count
-        _audioTracksReceived++;
+        // Update debug state
+        _onTrackFired = true;
         _debugController.add((tracks: _audioTracksReceived, onTrack: true, ice: _iceState));
 
-        debugPrint('LiveStream: ========== AUDIO TRACK RECEIVED ==========');
+        if (event.track.kind == 'audio') {
+          // Update debug track count
+          _audioTracksReceived++;
+          _debugController.add((tracks: _audioTracksReceived, onTrack: true, ice: _iceState));
 
-        // Audio is already configured in _handleIncomingOffer BEFORE peer connection
-        // Just enable the track and set up the renderer - NO async audio config here
-        // to avoid race conditions
+          debugPrint('LiveStream: ========== AUDIO TRACK RECEIVED ==========');
 
-        // Enable the track immediately (synchronous)
-        event.track.enabled = !_isMuted;
-        debugPrint('LiveStream: Track enabled: ${event.track.enabled}');
+          // Audio is already configured in _handleIncomingOffer BEFORE peer connection
+          // Just enable the track and set up the renderer - NO async audio config here
+          // to avoid race conditions
 
-        if (event.streams.isNotEmpty) {
-          final remoteStream = event.streams.first;
-          _remoteStreams[peerId] = remoteStream;
-
-          // Enable all audio tracks in the stream (synchronous, respects mute state)
-          for (final track in remoteStream.getAudioTracks()) {
-            track.enabled = !_isMuted;
-            debugPrint('LiveStream: Stream track ${track.id} enabled: ${track.enabled}');
+          // Enable the track immediately (synchronous)
+          try {
+            event.track.enabled = !_isMuted;
+            debugPrint('LiveStream: Track enabled: ${event.track.enabled}');
+          } catch (e) {
+            debugPrint('LiveStream: Error enabling track: $e');
           }
 
-          // Create renderer and notify in a non-blocking way
-          // Use unawaited future to avoid blocking onTrack callback
-          _setupAudioRendererAsync(peerId, remoteStream);
-        } else {
-          debugPrint('LiveStream: WARNING - No stream in event, only track');
+          if (event.streams.isNotEmpty) {
+            final remoteStream = event.streams.first;
+            _remoteStreams[peerId] = remoteStream;
+
+            // Enable all audio tracks in the stream (synchronous, respects mute state)
+            for (final track in remoteStream.getAudioTracks()) {
+              try {
+                track.enabled = !_isMuted;
+                debugPrint('LiveStream: Stream track ${track.id} enabled: ${track.enabled}');
+              } catch (e) {
+                debugPrint('LiveStream: Error enabling stream track: $e');
+              }
+            }
+
+            // Create renderer and notify in a non-blocking way
+            // Use unawaited future to avoid blocking onTrack callback
+            _setupAudioRendererAsync(peerId, remoteStream);
+          } else {
+            debugPrint('LiveStream: WARNING - No stream in event, only track');
+          }
         }
+      } catch (e) {
+        debugPrint('LiveStream: CRITICAL - onTrack handler error: $e');
       }
     };
 
