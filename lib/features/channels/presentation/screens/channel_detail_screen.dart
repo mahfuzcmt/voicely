@@ -14,8 +14,10 @@ import '../../../messaging/data/message_repository.dart';
 import '../../../messaging/domain/models/message_model.dart';
 import '../../../ptt/presentation/providers/live_ptt_providers.dart';
 import '../../../ptt/presentation/providers/ptt_providers.dart';
+import '../../../ptt/presentation/providers/simple_ptt_providers.dart';
 import '../../../ptt/presentation/widgets/live_ptt_button.dart';
 import '../../../ptt/presentation/widgets/ptt_button.dart';
+import '../../../ptt/presentation/widgets/simple_ptt_button.dart';
 import '../../domain/models/channel_model.dart';
 
 // REMOVED: channelMessagesProvider - was causing excessive Firestore reads
@@ -165,7 +167,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
 
     try {
       // Check if currently in a live broadcast - don't play if listening
-      final session = ref.read(livePttSessionProvider(widget.channelId));
+      final session = ref.read(simplePttSessionProvider(widget.channelId));
       if (session.isListening) {
         if (mounted) {
           context.showSnackBar('Cannot replay during live broadcast');
@@ -355,8 +357,8 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
     final channelAsync = ref.watch(channelProvider(widget.channelId));
 
     // Listen for incoming broadcast to stop audio playback
-    ref.listen<LivePttSessionState>(
-      livePttSessionProvider(widget.channelId),
+    ref.listen<SimplePttSessionState>(
+      simplePttSessionProvider(widget.channelId),
       (previous, next) {
         // When someone starts broadcasting (we start listening), stop audio
         if (previous?.isListening != true && next.isListening == true) {
@@ -421,17 +423,23 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
           body: SafeArea(
             child: LayoutBuilder(
               builder: (context, constraints) {
-                final isSmallScreen = constraints.maxWidth < 200 || constraints.maxHeight < 400;
+                final isSmallScreen = constraints.maxWidth < 250 || constraints.maxHeight < 450;
                 return Column(
                   children: [
                     // Top bar with back, title, and replay button
                     _buildTopBar(channel),
 
-                    // User/Channel info section - hide on tiny screens
-                    if (!isSmallScreen) _buildChannelInfo(channel),
+                    // User/Channel info section - compact on small screens
+                    if (isSmallScreen)
+                      _buildCompactChannelInfo(channel)
+                    else
+                      _buildChannelInfo(channel),
 
-                    // Action buttons (camera, emergency, mute) - compact on small screens
-                    if (!isSmallScreen) _buildActionButtons(channel),
+                    // Action buttons - compact on small screens
+                    if (isSmallScreen)
+                      _buildCompactActionButtons(channel)
+                    else
+                      _buildActionButtons(channel),
 
                     // Main PTT area - takes most of the space
                     Expanded(
@@ -449,7 +457,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
 
   Widget _buildTopBar(ChannelModel channel) {
     final session = AppConstants.useLiveStreaming
-        ? ref.watch(livePttSessionProvider(channel.id))
+        ? ref.watch(simplePttSessionProvider(channel.id))
         : null;
 
     final isActive = session?.isBroadcasting == true || session?.isListening == true;
@@ -539,7 +547,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
 
   Widget _buildChannelInfo(ChannelModel channel) {
     final session = AppConstants.useLiveStreaming
-        ? ref.watch(livePttSessionProvider(channel.id))
+        ? ref.watch(simplePttSessionProvider(channel.id))
         : null;
 
     return Padding(
@@ -644,7 +652,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
 
   Widget _buildActionButtons(ChannelModel channel) {
     final session = AppConstants.useLiveStreaming
-        ? ref.watch(livePttSessionProvider(channel.id))
+        ? ref.watch(simplePttSessionProvider(channel.id))
         : null;
     final isMuted = session?.isMuted ?? false;
 
@@ -671,7 +679,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
             icon: isMuted ? Icons.volume_off : Icons.volume_up,
             color: isMuted ? Colors.red : AppColors.primary,
             onTap: () {
-              ref.read(livePttSessionProvider(channel.id).notifier).toggleMute();
+              ref.read(simplePttSessionProvider(channel.id).notifier).toggleMute();
               context.showSnackBar(
                 isMuted ? 'Audio unmuted' : 'Audio muted',
               );
@@ -743,6 +751,168 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
     );
   }
 
+  /// Compact channel info for small screens (T310 2" display)
+  Widget _buildCompactChannelInfo(ChannelModel channel) {
+    final session = AppConstants.useLiveStreaming
+        ? ref.watch(simplePttSessionProvider(channel.id))
+        : null;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: Row(
+        children: [
+          // Compact channel avatar with status
+          Stack(
+            children: [
+              CircleAvatar(
+                radius: 16,
+                backgroundColor: AppColors.surfaceDark,
+                child: Text(
+                  channel.name.isNotEmpty ? channel.name[0].toUpperCase() : 'C',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+              if (session?.isConnected ?? false)
+                Positioned(
+                  bottom: 0,
+                  right: 0,
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: Colors.green,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 1.5),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(width: 8),
+          // Channel name (compact)
+          Expanded(
+            child: Text(
+              channel.name,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          // Connection status indicator
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+              color: (session?.isConnected ?? false)
+                  ? Colors.green
+                  : (session?.isConnecting ?? false)
+                      ? Colors.yellow[700]
+                      : Colors.grey,
+              shape: BoxShape.circle,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Compact action buttons for small screens (T310 2" display)
+  Widget _buildCompactActionButtons(ChannelModel channel) {
+    final session = AppConstants.useLiveStreaming
+        ? ref.watch(simplePttSessionProvider(channel.id))
+        : null;
+    final isMuted = session?.isMuted ?? false;
+
+    // Get online users count
+    final membersAsync = AppConstants.useLiveStreaming
+        ? ref.watch(liveRoomMembersProvider(channel.id))
+        : null;
+    final members = membersAsync?.valueOrNull ?? [];
+    final onlineCount = members.length;
+    final totalMembers = channel.memberIds.isNotEmpty
+        ? channel.memberIds.length
+        : channel.memberCount;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          // Compact mute button
+          GestureDetector(
+            onTap: () {
+              ref.read(simplePttSessionProvider(channel.id).notifier).toggleMute();
+              context.showSnackBar(
+                isMuted ? 'Audio unmuted' : 'Audio muted',
+              );
+            },
+            child: Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: isMuted
+                    ? Colors.red.withValues(alpha: 0.1)
+                    : AppColors.primary.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                isMuted ? Icons.volume_off : Icons.volume_up,
+                color: isMuted ? Colors.red : AppColors.primary,
+                size: 18,
+              ),
+            ),
+          ),
+          // Compact online users count
+          GestureDetector(
+            onTap: () => _showOnlineUsersSheet(channel.id),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.green.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.people, color: Colors.green, size: 14),
+                  const SizedBox(width: 4),
+                  Text(
+                    totalMembers > 0
+                        ? '$onlineCount/$totalMembers'
+                        : '$onlineCount',
+                    style: const TextStyle(
+                      color: Colors.green,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // Compact emergency button (icon only)
+          GestureDetector(
+            onTap: () => _showEmergencyWarning(),
+            child: Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: Colors.red.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.warning, color: Colors.red, size: 18),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildFullPagePttArea(ChannelModel channel) {
     if (AppConstants.useLiveStreaming) {
       return _buildLiveFullPagePtt(channel);
@@ -759,7 +929,8 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
               ? constraints.maxWidth
               : constraints.maxHeight;
           final buttonSize = (maxDimension * 0.7).clamp(80.0, 320.0);
-          return LivePttButton(
+          // Use simplified PTT button for stability
+          return SimplePttButton(
             channelId: channel.id,
             size: buttonSize,
           );

@@ -17,7 +17,7 @@ import '../../../channels/data/channel_repository.dart';
 import '../../../messaging/data/message_repository.dart';
 import '../../data/audio_recording_service.dart';
 import '../../data/audio_storage_service.dart';
-import '../../data/live_streaming_service.dart';
+import '../../data/live_streaming_service.old.dart';
 import '../../data/websocket_signaling_service.dart';
 
 /// Token cache for faster reconnection
@@ -97,6 +97,8 @@ class LivePttSessionState {
   final int listenerCount;
   // Total room members (excluding self)
   final int totalRoomMembers;
+  // Audio renderers for RTCVideoView consumption (required for audio playback)
+  final Map<String, RTCVideoRenderer> audioRenderers;
 
   const LivePttSessionState({
     this.state = LivePttState.disconnected,
@@ -112,6 +114,7 @@ class LivePttSessionState {
     this.iceState,
     this.listenerCount = 0,
     this.totalRoomMembers = 0,
+    this.audioRenderers = const {},
   });
 
   /// Check if all room members are listening
@@ -134,6 +137,7 @@ class LivePttSessionState {
     String? iceState,
     int? listenerCount,
     int? totalRoomMembers,
+    Map<String, RTCVideoRenderer>? audioRenderers,
   }) {
     return LivePttSessionState(
       state: state ?? this.state,
@@ -157,6 +161,7 @@ class LivePttSessionState {
       iceState: iceState ?? this.iceState,
       listenerCount: listenerCount ?? this.listenerCount,
       totalRoomMembers: totalRoomMembers ?? this.totalRoomMembers,
+      audioRenderers: audioRenderers ?? this.audioRenderers,
     );
   }
 
@@ -253,6 +258,7 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
   StreamSubscription? _roomMembersSubscription;
   StreamSubscription? _nativeWsConnectionSubscription;
   StreamSubscription? _nativeWsMessageSubscription;
+  StreamSubscription? _audioRendererSubscription;
 
   /// Callback to show toast when listener joins (set by UI)
   void Function(String listenerName)? onListenerJoined;
@@ -653,6 +659,16 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       debugPrint('LivePTT: Room members updated: ${members.length} total, $totalMembers others');
       state = state.copyWith(totalRoomMembers: totalMembers);
     });
+
+    // Listen for audio renderer updates - CRITICAL for audio playback
+    // These renderers must be consumed by RTCVideoView widgets in the UI
+    _audioRendererSubscription = _streamingService.audioRendererStream.listen((renderers) {
+      debugPrint('LivePTT: Audio renderers updated: ${renderers.length} renderers');
+      state = state.copyWith(audioRenderers: renderers);
+    });
+
+    // Initialize with current renderers (in case some were created before subscription)
+    state = state.copyWith(audioRenderers: _streamingService.audioRenderers);
   }
 
   /// Timeout duration for initialization operations
@@ -1297,6 +1313,11 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
 
     // Duration update timer (every second)
     _broadcastTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      // Check if disposed before updating state
+      if (_isDisposed) {
+        _stopBroadcastTimer();
+        return;
+      }
       // Trigger rebuild to update duration display
       state = state.copyWith(
         state: LivePttState.broadcasting,
@@ -1308,6 +1329,8 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     _autoStopTimer = Timer(
       const Duration(seconds: _maxBroadcastDurationSeconds),
       () {
+        // Check if disposed before stopping
+        if (_isDisposed) return;
         debugPrint('LivePTT: Auto-stopping broadcast after $_maxBroadcastDurationSeconds seconds');
         stopBroadcasting();
       },
@@ -1438,6 +1461,8 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     _listenerJoinedSubscription = null;
     _roomMembersSubscription?.cancel();
     _roomMembersSubscription = null;
+    _audioRendererSubscription?.cancel();
+    _audioRendererSubscription = null;
     _fcmBroadcastSubscription?.cancel();
     _fcmBroadcastSubscription = null;
     _nativeWsConnectionSubscription?.cancel();
