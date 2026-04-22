@@ -419,22 +419,27 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
         return Scaffold(
           backgroundColor: Colors.white,
           body: SafeArea(
-            child: Column(
-              children: [
-                // Top bar with back, title, and replay button
-                _buildTopBar(channel),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final isSmallScreen = constraints.maxWidth < 200 || constraints.maxHeight < 400;
+                return Column(
+                  children: [
+                    // Top bar with back, title, and replay button
+                    _buildTopBar(channel),
 
-                // User/Channel info section
-                _buildChannelInfo(channel),
+                    // User/Channel info section - hide on tiny screens
+                    if (!isSmallScreen) _buildChannelInfo(channel),
 
-                // Action buttons (camera, emergency, mute)
-                _buildActionButtons(channel),
+                    // Action buttons (camera, emergency, mute) - compact on small screens
+                    if (!isSmallScreen) _buildActionButtons(channel),
 
-                // Main PTT area - takes most of the space
-                Expanded(
-                  child: _buildFullPagePttArea(channel),
-                ),
-              ],
+                    // Main PTT area - takes most of the space
+                    Expanded(
+                      child: _buildFullPagePttArea(channel),
+                    ),
+                  ],
+                );
+              },
             ),
           ),
         );
@@ -747,9 +752,18 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
 
   Widget _buildLiveFullPagePtt(ChannelModel channel) {
     return Center(
-      child: LivePttButton(
-        channelId: channel.id,
-        size: 320,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // Scale button to fit small screens (e.g. Inrico 2" x 1.25" display)
+          final maxDimension = constraints.maxWidth < constraints.maxHeight
+              ? constraints.maxWidth
+              : constraints.maxHeight;
+          final buttonSize = (maxDimension * 0.7).clamp(80.0, 320.0);
+          return LivePttButton(
+            channelId: channel.id,
+            size: buttonSize,
+          );
+        },
       ),
     );
   }
@@ -762,9 +776,17 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
 
   Widget _buildLegacyFullPagePtt(ChannelModel channel) {
     return Center(
-      child: PttButton(
-        channelId: channel.id,
-        size: 380,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final maxDimension = constraints.maxWidth < constraints.maxHeight
+              ? constraints.maxWidth
+              : constraints.maxHeight;
+          final buttonSize = (maxDimension * 0.7).clamp(80.0, 380.0);
+          return PttButton(
+            channelId: channel.id,
+            size: buttonSize,
+          );
+        },
       ),
     );
   }
