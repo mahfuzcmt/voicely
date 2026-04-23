@@ -39,14 +39,17 @@ class SimpleLiveStreamingService {
   final String channelId;
   final WebSocketSignalingService _wsService;
 
-  // WebRTC state - single peer connection only
+  // WebRTC state - multiple peer connections for broadcasting to all listeners
   MediaStream? _localStream;
-  RTCPeerConnection? _peerConnection;
+  final Map<String, RTCPeerConnection> _peerConnections = {};
   MediaStream? _remoteStream;
-  String? _currentPeerId;
+  String? _currentSpeakerPeerId; // The peer we're receiving audio from
 
-  // Pending ICE candidates (before remote description is set)
-  final List<RTCIceCandidate> _pendingIceCandidates = [];
+  // Pending ICE candidates per peer (before remote description is set)
+  final Map<String, List<RTCIceCandidate>> _pendingIceCandidates = {};
+
+  // Track connected listeners for count
+  final Set<String> _connectedListeners = {};
 
   // Stream subscriptions
   StreamSubscription? _offerSubscription;
@@ -89,7 +92,7 @@ class SimpleLiveStreamingService {
   bool get isMuted => _isMuted;
   MediaStream? get localStream => _localStream;
   String? get currentSpeakerId => _currentSpeakerId;
-  int get activeListenerCount => _isBroadcasting ? 1 : 0; // Simplified
+  int get activeListenerCount => _connectedListeners.length;
 
   SimpleLiveStreamingService({
     required this.channelId,
@@ -151,19 +154,20 @@ class SimpleLiveStreamingService {
         if (_state == SimpleLiveStreamingState.broadcasting ||
             _state == SimpleLiveStreamingState.listening) {
           _isBroadcasting = false;
-          _closePeerConnection();
+          _closeAllPeerConnections();
           _disposeLocalStream();
           _updateState(SimpleLiveStreamingState.idle);
         }
       }
     });
 
-    // Listen for new members when broadcasting
+    // Listen for new members when broadcasting - send offer to new joiners
     _memberJoinedSubscription = _wsService.roomMembers.listen((event) async {
       if (event.roomId == channelId && _isBroadcasting && _localStream != null) {
         final myUserId = _wsService.userId;
         for (final member in event.members) {
-          if (member.userId != myUserId && _currentPeerId != member.userId) {
+          // Send offer to new members who don't already have a connection
+          if (member.userId != myUserId && !_peerConnections.containsKey(member.userId)) {
             debugPrint(
                 'SimpleStream: New listener ${member.displayName}, sending offer');
             await _createAndSendOffer(member.userId);
@@ -272,7 +276,7 @@ class SimpleLiveStreamingService {
     _updateState(SimpleLiveStreamingState.idle);
 
     _wsService.releaseFloor(channelId);
-    await _closePeerConnection();
+    await _closeAllPeerConnections();
     await _disposeLocalStream();
   }
 
@@ -286,7 +290,7 @@ class SimpleLiveStreamingService {
       _setLocalAudioEnabled(false);
     }
 
-    await _closePeerConnection();
+    await _closeAllPeerConnections();
     await _disposeLocalStream();
 
     _currentSpeakerId = null;
@@ -309,10 +313,10 @@ class SimpleLiveStreamingService {
         _isBroadcasting = false;
         _broadcastStartTime = null;
         _updateState(SimpleLiveStreamingState.idle);
-        _closePeerConnection();
+        _closeAllPeerConnections();
         _disposeLocalStream();
       } else {
-        _closePeerConnection();
+        _closeAllPeerConnections();
         _updateState(SimpleLiveStreamingState.idle);
       }
       return;
@@ -333,7 +337,7 @@ class SimpleLiveStreamingService {
       // Someone else is speaking
       debugPrint('SimpleStream: ${floor.speakerName} is speaking');
       if (_isBroadcasting) {
-        _closePeerConnection();
+        _closeAllPeerConnections();
         _disposeLocalStream();
         _broadcastStartTime = null;
       }
@@ -358,32 +362,42 @@ class SimpleLiveStreamingService {
     }
   }
 
-  /// Start streaming to listeners
+  /// Start streaming to ALL listeners in the room
   Future<void> _startStreamingToListeners() async {
     if (_localStream == null) return;
 
-    debugPrint('SimpleStream: Starting to stream');
-    await _closePeerConnection();
+    debugPrint('SimpleStream: Starting to stream to all listeners');
+    await _closeAllPeerConnections();
 
-    // Get listeners and send offers
+    // Get all listeners and send offers to ALL of them
     final members = _wsService.getRoomMembers(channelId);
     final myUserId = _wsService.userId;
 
-    for (final member in members) {
-      if (member.userId != myUserId) {
+    final listenersToConnect = members
+        .where((member) => member.userId != myUserId)
+        .toList();
+
+    debugPrint('SimpleStream: Sending offers to ${listenersToConnect.length} listeners');
+
+    // Send offers to all listeners in parallel
+    await Future.wait(
+      listenersToConnect.map((member) async {
         debugPrint('SimpleStream: Sending offer to ${member.displayName}');
         await _createAndSendOffer(member.userId);
-        break; // Only first listener for simplicity
-      }
-    }
+      }),
+    );
+
+    _listenerCountController.add(_connectedListeners.length);
   }
 
   /// Create and send offer to a listener
   Future<void> _createAndSendOffer(String listenerId) async {
     try {
+      // Close existing connection to this peer if any
+      await _closePeerConnectionFor(listenerId);
+
       final pc = await _createPeerConnection(listenerId);
-      _peerConnection = pc;
-      _currentPeerId = listenerId;
+      _peerConnections[listenerId] = pc;
 
       // Add local tracks
       if (_localStream != null) {
@@ -399,7 +413,7 @@ class SimpleLiveStreamingService {
       });
 
       if (offer.sdp == null || offer.sdp!.isEmpty) {
-        debugPrint('SimpleStream: Failed to create offer');
+        debugPrint('SimpleStream: Failed to create offer for $listenerId');
         return;
       }
 
@@ -413,12 +427,12 @@ class SimpleLiveStreamingService {
 
       debugPrint('SimpleStream: Offer sent to $listenerId');
     } catch (e) {
-      Logger.e('Error creating offer', error: e);
-      await _closePeerConnection();
+      Logger.e('Error creating offer for $listenerId', error: e);
+      await _closePeerConnectionFor(listenerId);
     }
   }
 
-  /// Handle incoming offer
+  /// Handle incoming offer (when receiving audio from broadcaster)
   Future<void> _handleIncomingOffer(String fromUserId, String sdp) async {
     if (fromUserId == _wsService.userId) return;
 
@@ -429,13 +443,13 @@ class SimpleLiveStreamingService {
       await NativeAudioService.setAudioModeForVoiceChat();
       await NativeAudioService.setSpeakerOn(true);
 
-      // Close existing connection
-      await _closePeerConnection();
+      // Close existing connection to this speaker if any
+      await _closePeerConnectionFor(fromUserId);
 
-      // Create peer connection
+      // Create peer connection for receiving
       final pc = await _createPeerConnection(fromUserId);
-      _peerConnection = pc;
-      _currentPeerId = fromUserId;
+      _peerConnections[fromUserId] = pc;
+      _currentSpeakerPeerId = fromUserId;
 
       // Add transceiver for receiving audio
       await pc.addTransceiver(
@@ -446,8 +460,8 @@ class SimpleLiveStreamingService {
       // Set remote description
       await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
 
-      // Apply pending ICE candidates
-      await _applyPendingIceCandidates();
+      // Apply pending ICE candidates for this peer
+      await _applyPendingIceCandidatesFor(fromUserId);
 
       // Create answer
       final answer = await pc.createAnswer({
@@ -466,27 +480,33 @@ class SimpleLiveStreamingService {
       debugPrint('SimpleStream: Answer sent to $fromUserId');
     } catch (e) {
       Logger.e('Failed to handle offer', error: e);
-      await _closePeerConnection();
+      await _closePeerConnectionFor(fromUserId);
     }
   }
 
-  /// Handle incoming answer
+  /// Handle incoming answer (when broadcasting)
   Future<void> _handleIncomingAnswer(String fromUserId, String sdp) async {
-    if (!_isBroadcasting || _peerConnection == null) return;
+    if (!_isBroadcasting) return;
+
+    final pc = _peerConnections[fromUserId];
+    if (pc == null) {
+      debugPrint('SimpleStream: No peer connection for $fromUserId');
+      return;
+    }
 
     debugPrint('SimpleStream: Received answer from $fromUserId');
 
     try {
-      final signalingState = _peerConnection!.signalingState;
+      final signalingState = pc.signalingState;
       if (signalingState == RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
-        await _peerConnection!
-            .setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
-        await _applyPendingIceCandidates();
-        debugPrint('SimpleStream: Answer processed');
-        _listenerCountController.add(1);
+        await pc.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
+        await _applyPendingIceCandidatesFor(fromUserId);
+        debugPrint('SimpleStream: Answer processed from $fromUserId');
+        _connectedListeners.add(fromUserId);
+        _listenerCountController.add(_connectedListeners.length);
       }
     } catch (e) {
-      Logger.e('Failed to handle answer', error: e);
+      Logger.e('Failed to handle answer from $fromUserId', error: e);
     }
   }
 
@@ -499,36 +519,42 @@ class SimpleLiveStreamingService {
   ) async {
     final iceCandidate = RTCIceCandidate(candidate, sdpMid, sdpMLineIndex);
 
-    if (_peerConnection == null) {
-      _pendingIceCandidates.add(iceCandidate);
+    final pc = _peerConnections[fromUserId];
+    if (pc == null) {
+      // Store pending candidate for this peer
+      _pendingIceCandidates.putIfAbsent(fromUserId, () => []);
+      _pendingIceCandidates[fromUserId]!.add(iceCandidate);
       return;
     }
 
-    final remoteDesc = await _peerConnection!.getRemoteDescription();
+    final remoteDesc = await pc.getRemoteDescription();
     if (remoteDesc == null) {
-      _pendingIceCandidates.add(iceCandidate);
+      _pendingIceCandidates.putIfAbsent(fromUserId, () => []);
+      _pendingIceCandidates[fromUserId]!.add(iceCandidate);
       return;
     }
 
     try {
-      await _peerConnection!.addCandidate(iceCandidate);
+      await pc.addCandidate(iceCandidate);
     } catch (e) {
-      debugPrint('SimpleStream: Failed to add ICE candidate: $e');
+      debugPrint('SimpleStream: Failed to add ICE candidate from $fromUserId: $e');
     }
   }
 
-  /// Apply pending ICE candidates
-  Future<void> _applyPendingIceCandidates() async {
-    if (_peerConnection == null || _pendingIceCandidates.isEmpty) return;
+  /// Apply pending ICE candidates for a specific peer
+  Future<void> _applyPendingIceCandidatesFor(String peerId) async {
+    final pc = _peerConnections[peerId];
+    final candidates = _pendingIceCandidates[peerId];
+    if (pc == null || candidates == null || candidates.isEmpty) return;
 
-    for (final candidate in _pendingIceCandidates) {
+    for (final candidate in candidates) {
       try {
-        await _peerConnection!.addCandidate(candidate);
+        await pc.addCandidate(candidate);
       } catch (e) {
-        debugPrint('SimpleStream: Failed to apply pending ICE: $e');
+        debugPrint('SimpleStream: Failed to apply pending ICE for $peerId: $e');
       }
     }
-    _pendingIceCandidates.clear();
+    _pendingIceCandidates.remove(peerId);
   }
 
   /// Create WebRTC peer connection
@@ -558,9 +584,12 @@ class SimpleLiveStreamingService {
 
     // Handle connection state
     pc.onConnectionState = (RTCPeerConnectionState state) {
-      debugPrint('SimpleStream: Connection state: $state');
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-        _closePeerConnection();
+      debugPrint('SimpleStream: Connection state for $peerId: $state');
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+          state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+        _connectedListeners.remove(peerId);
+        _listenerCountController.add(_connectedListeners.length);
+        _closePeerConnectionFor(peerId);
       }
     };
 
@@ -584,34 +613,68 @@ class SimpleLiveStreamingService {
     };
 
     pc.onIceConnectionState = (RTCIceConnectionState state) {
-      debugPrint('SimpleStream: ICE state: $state');
+      debugPrint('SimpleStream: ICE state for $peerId: $state');
 
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
           state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
-        debugPrint('SimpleStream: ICE connected - audio should flow');
-      } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-        _closePeerConnection();
+        debugPrint('SimpleStream: ICE connected to $peerId - audio should flow');
+        if (_isBroadcasting) {
+          _connectedListeners.add(peerId);
+          _listenerCountController.add(_connectedListeners.length);
+        }
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
+                 state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+        _connectedListeners.remove(peerId);
+        _listenerCountController.add(_connectedListeners.length);
       }
     };
 
     return pc;
   }
 
-  /// Close peer connection
-  Future<void> _closePeerConnection() async {
-    _pendingIceCandidates.clear();
+  /// Close peer connection for a specific peer
+  Future<void> _closePeerConnectionFor(String peerId) async {
+    _pendingIceCandidates.remove(peerId);
+    _connectedListeners.remove(peerId);
 
-    if (_peerConnection != null) {
-      await _peerConnection!.close();
-      _peerConnection = null;
+    final pc = _peerConnections.remove(peerId);
+    if (pc != null) {
+      try {
+        await pc.close();
+      } catch (e) {
+        debugPrint('SimpleStream: Error closing connection to $peerId: $e');
+      }
     }
+
+    if (peerId == _currentSpeakerPeerId) {
+      _currentSpeakerPeerId = null;
+      if (_remoteStream != null) {
+        await _remoteStream!.dispose();
+        _remoteStream = null;
+      }
+    }
+  }
+
+  /// Close all peer connections
+  Future<void> _closeAllPeerConnections() async {
+    _pendingIceCandidates.clear();
+    _connectedListeners.clear();
+
+    for (final entry in _peerConnections.entries) {
+      try {
+        await entry.value.close();
+      } catch (e) {
+        debugPrint('SimpleStream: Error closing connection to ${entry.key}: $e');
+      }
+    }
+    _peerConnections.clear();
 
     if (_remoteStream != null) {
       await _remoteStream!.dispose();
       _remoteStream = null;
     }
 
-    _currentPeerId = null;
+    _currentSpeakerPeerId = null;
     _listenerCountController.add(0);
   }
 
@@ -663,7 +726,7 @@ class SimpleLiveStreamingService {
     await _connectionSubscription?.cancel();
     await _memberJoinedSubscription?.cancel();
 
-    await _closePeerConnection();
+    await _closeAllPeerConnections();
     await _disposeLocalStream();
 
     try {

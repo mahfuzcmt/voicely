@@ -18,7 +18,7 @@ class SimplePttButton extends ConsumerStatefulWidget {
   const SimplePttButton({
     super.key,
     required this.channelId,
-    this.size = 120,
+    this.size = 180, // Bigger button for PTT devices
   });
 
   @override
@@ -295,10 +295,10 @@ class _SimplePttButtonState extends ConsumerState<SimplePttButton>
               children: [
                 Icon(
                   _getIcon(session),
-                  size: widget.size * 0.2,
+                  size: widget.size * 0.25,
                   color: iconColor,
                 ),
-                SizedBox(height: widget.size * 0.02),
+                SizedBox(height: widget.size * 0.015),
                 _buildStateText(session, iconColor),
               ],
             ),
@@ -329,21 +329,21 @@ class _SimplePttButtonState extends ConsumerState<SimplePttButton>
           _buildRecordingIndicator(
             session.isBroadcastTimeWarning ? Colors.red : iconColor,
           ),
-          SizedBox(height: widget.size * 0.02),
+          SizedBox(height: widget.size * 0.015),
           if (session.listenerCount > 0) ...[
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
                   Icons.headphones,
-                  size: widget.size * 0.045,
+                  size: widget.size * 0.055,
                   color: Colors.green,
                 ),
                 SizedBox(width: widget.size * 0.01),
                 Text(
                   '${session.listenerCount}',
                   style: TextStyle(
-                    fontSize: widget.size * 0.05,
+                    fontSize: widget.size * 0.06,
                     color: Colors.green,
                     fontWeight: FontWeight.bold,
                   ),
@@ -357,11 +357,11 @@ class _SimplePttButtonState extends ConsumerState<SimplePttButton>
                 ? '${session.remainingBroadcastSeconds}s'
                 : 'Tap to stop',
             style: TextStyle(
-              fontSize: widget.size * 0.055,
+              fontSize: widget.size * 0.07,
               color: session.isBroadcastTimeWarning
                   ? Colors.red
                   : Colors.orange[700],
-              fontWeight: FontWeight.w600,
+              fontWeight: FontWeight.bold,
             ),
           ),
         ],
@@ -379,27 +379,27 @@ class _SimplePttButtonState extends ConsumerState<SimplePttButton>
       return Text(
         'Listening',
         style: TextStyle(
-          fontSize: widget.size * 0.055,
+          fontSize: widget.size * 0.07,
           color: Colors.green,
-          fontWeight: FontWeight.w600,
+          fontWeight: FontWeight.bold,
         ),
       );
     } else if (session.canBroadcast) {
       return Text(
         'Tap to speak',
         style: TextStyle(
-          fontSize: widget.size * 0.055,
+          fontSize: widget.size * 0.07,
           color: Colors.grey[600],
-          fontWeight: FontWeight.w600,
+          fontWeight: FontWeight.bold,
         ),
       );
     } else if (!session.isConnected) {
       return Text(
         'Reconnect',
         style: TextStyle(
-          fontSize: widget.size * 0.055,
+          fontSize: widget.size * 0.065,
           color: Colors.grey[500],
-          fontWeight: FontWeight.w600,
+          fontWeight: FontWeight.bold,
         ),
       );
     }

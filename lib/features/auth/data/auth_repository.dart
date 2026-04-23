@@ -3,11 +3,15 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/constants/app_constants.dart';
 import '../../../core/utils/logger.dart';
 import '../../../firebase_options.dart';
 import '../domain/models/user_model.dart';
+
+/// Key for storing user login status in SharedPreferences
+const String _loginStatusKey = 'firebase_user_id';
 
 final authRepositoryProvider = Provider<AuthRepository>((ref) {
   return AuthRepository(
@@ -46,6 +50,28 @@ class AuthRepository {
     return '$cleanPhone@voicely.app';
   }
 
+  /// Save user login status to SharedPreferences for background isolate access
+  Future<void> _saveLoginStatus(String userId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_loginStatusKey, userId);
+      Logger.d('Saved login status for $userId');
+    } catch (e) {
+      Logger.e('Failed to save login status', error: e);
+    }
+  }
+
+  /// Clear user login status from SharedPreferences
+  Future<void> _clearLoginStatus() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_loginStatusKey);
+      Logger.d('Cleared login status');
+    } catch (e) {
+      Logger.e('Failed to clear login status', error: e);
+    }
+  }
+
   /// Sign in with phone number and password
   Future<UserModel> signInWithPhoneNumber({
     required String phoneNumber,
@@ -74,6 +100,8 @@ class AuthRepository {
         );
         await _usersRef.doc(user.uid).set(userModel.toFirestore());
         Logger.d('Created Firestore user document for ${user.uid}');
+        // Save login status for background isolate
+        await _saveLoginStatus(user.uid);
         return userModel;
       }
 
@@ -81,6 +109,9 @@ class AuthRepository {
 
       // Save FCM token for push notifications
       await saveFcmToken();
+
+      // Save login status for background isolate
+      await _saveLoginStatus(user.uid);
 
       return await getUserById(user.uid);
     } on FirebaseAuthException catch (e) {
@@ -247,6 +278,8 @@ class AuthRepository {
       if (userId != null) {
         await _updateUserStatus(userId, UserStatus.offline);
       }
+      // Clear login status for background isolate
+      await _clearLoginStatus();
       await _auth.signOut();
     } catch (e) {
       Logger.e('Sign out error', error: e);

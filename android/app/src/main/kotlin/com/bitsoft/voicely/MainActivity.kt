@@ -298,6 +298,9 @@ class MainActivity : FlutterActivity() {
                 "isPttButtonPressed" -> {
                     result.success(isPttButtonPressed)
                 }
+                "wakeScreen" -> {
+                    result.success(wakeScreen())
+                }
                 else -> {
                     result.notImplemented()
                 }
@@ -338,6 +341,7 @@ class MainActivity : FlutterActivity() {
                             if (!isPttButtonPressed) {
                                 isPttButtonPressed = true
                                 android.util.Log.d("VoicelyPTT", "PTT broadcast DOWN (Inrico T310)")
+                                wakeScreen() // Wake screen on PTT press
                                 sendPttEventSafe("ptt_down", 141, "broadcast")
                             }
                         }
@@ -423,6 +427,9 @@ class MainActivity : FlutterActivity() {
             if (keyCode in enabledPttKeyCodes && !isPttButtonPressed) {
                 isPttButtonPressed = true
                 android.util.Log.d("VoicelyPTT", "PTT button DOWN: keyCode=$keyCode")
+
+                // Wake up the screen when PTT is pressed
+                wakeScreen()
 
                 // Send event to Flutter safely
                 sendPttEventSafe("ptt_down", keyCode, "keyevent")
@@ -622,16 +629,27 @@ class MainActivity : FlutterActivity() {
                 android.util.Log.e("VoicelyAudio", "Failed to set speakerphone: ${e.message}", e)
             }
 
-            // Note: Do NOT override user's volume settings - respect device volume level
-            android.util.Log.d("VoicelyAudio", "Step 4: Checking current volume (not overriding user setting)...")
+            // Ensure minimum voice volume for audible playback
+            android.util.Log.d("VoicelyAudio", "Step 4: Checking and ensuring minimum voice volume...")
             try {
                 val voiceVolume = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
                 val maxVoiceVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
                 val musicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
                 val maxMusicVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                 android.util.Log.d("VoicelyAudio", "Voice volume: $voiceVolume/$maxVoiceVolume, Music volume: $musicVolume/$maxMusicVolume")
+
+                // Ensure minimum voice volume (at least 50% of max) for WebRTC audio
+                val minVoiceVolume = (maxVoiceVolume * 0.5).toInt()
+                if (voiceVolume < minVoiceVolume) {
+                    audioManager.setStreamVolume(
+                        AudioManager.STREAM_VOICE_CALL,
+                        minVoiceVolume,
+                        0 // No flags (silent change)
+                    )
+                    android.util.Log.d("VoicelyAudio", "Voice volume was too low ($voiceVolume), increased to $minVoiceVolume")
+                }
             } catch (e: Exception) {
-                android.util.Log.e("VoicelyAudio", "Failed to get volume info: ${e.message}", e)
+                android.util.Log.e("VoicelyAudio", "Failed to get/set volume: ${e.message}", e)
             }
 
             android.util.Log.d("VoicelyAudio", "Step 5: Checking Bluetooth status...")
@@ -1399,6 +1417,42 @@ class MainActivity : FlutterActivity() {
             partialWakeLock = null
         } catch (e: Exception) {
             android.util.Log.e("VoicelyWakeLock", "Error releasing partial wake lock", e)
+        }
+    }
+
+    /**
+     * Wake up the screen when PTT button is pressed
+     * Uses ACQUIRE_CAUSES_WAKEUP flag to turn on the display
+     */
+    private fun wakeScreen(): Boolean {
+        return try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+
+            // Check if screen is already on
+            val isScreenOn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
+                powerManager.isInteractive
+            } else {
+                @Suppress("DEPRECATION")
+                powerManager.isScreenOn
+            }
+
+            if (!isScreenOn) {
+                // Create a wake lock that turns on the screen
+                val wakeLock = powerManager.newWakeLock(
+                    PowerManager.FULL_WAKE_LOCK or
+                    PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                    PowerManager.ON_AFTER_RELEASE,
+                    "Voicely::ScreenWakeLock"
+                )
+
+                // Acquire briefly to wake screen, then release
+                wakeLock.acquire(3000L) // 3 seconds
+                android.util.Log.d("VoicelyPTT", "Screen woken up by PTT button")
+            }
+            true
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyPTT", "Failed to wake screen: ${e.message}", e)
+            false
         }
     }
 

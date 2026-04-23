@@ -463,7 +463,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
     final isActive = session?.isBroadcasting == true || session?.isListening == true;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Row(
         children: [
           // Back button
@@ -685,7 +685,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
               );
             },
           ),
-          // Online users count in the middle - clickable to show user list
+          // Online users count - clickable to show user list
           GestureDetector(
             onTap: () => _showOnlineUsersSheet(channel.id),
             child: Container(
@@ -712,40 +712,6 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
               ),
             ),
           ),
-          // Emergency button
-          GestureDetector(
-            onTap: () => _showEmergencyWarning(),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.red.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.warning, color: Colors.red, size: 18),
-                  const SizedBox(width: 6),
-                  const Text(
-                    'Emergency',
-                    style: TextStyle(
-                      color: Colors.red,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  Container(
-                    padding: const EdgeInsets.all(2),
-                    decoration: BoxDecoration(
-                      color: Colors.orange,
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(Icons.lock, color: Colors.white, size: 12),
-                  ),
-                ],
-              ),
-            ),
-          ),
         ],
       ),
     );
@@ -758,7 +724,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
         : null;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Row(
         children: [
           // Compact channel avatar with status
@@ -841,7 +807,7 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
         : channel.memberCount;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
@@ -896,18 +862,6 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
               ),
             ),
           ),
-          // Compact emergency button (icon only)
-          GestureDetector(
-            onTap: () => _showEmergencyWarning(),
-            child: Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: Colors.red.withValues(alpha: 0.1),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(Icons.warning, color: Colors.red, size: 18),
-            ),
-          ),
         ],
       ),
     );
@@ -921,21 +875,58 @@ class _ChannelDetailScreenState extends ConsumerState<ChannelDetailScreen>
   }
 
   Widget _buildLiveFullPagePtt(ChannelModel channel) {
-    return Center(
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          // Scale button to fit small screens (e.g. Inrico 2" x 1.25" display)
-          final maxDimension = constraints.maxWidth < constraints.maxHeight
-              ? constraints.maxWidth
-              : constraints.maxHeight;
-          final buttonSize = (maxDimension * 0.7).clamp(80.0, 320.0);
-          // Use simplified PTT button for stability
-          return SimplePttButton(
-            channelId: channel.id,
-            size: buttonSize,
-          );
-        },
-      ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Scale button to fill maximum available space on PTT devices
+        final maxDimension = constraints.maxWidth < constraints.maxHeight
+            ? constraints.maxWidth
+            : constraints.maxHeight;
+        // Use 0.92 multiplier for maximum button size
+        final buttonSize = (maxDimension * 0.92).clamp(120.0, 400.0);
+
+        return Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            // Listener count at top - compact
+            Consumer(
+              builder: (context, ref, _) {
+                final session = ref.watch(simplePttSessionProvider(channel.id));
+                if (session.listenerCount > 0 || session.isBroadcasting) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.headphones,
+                          size: 20,
+                          color: Colors.green[600],
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${session.listenerCount} listening',
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: Colors.green[600],
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+                return const SizedBox.shrink();
+              },
+            ),
+
+            // Main PTT button - fills available space
+            SimplePttButton(
+              channelId: channel.id,
+              size: buttonSize,
+            ),
+          ],
+        );
+      },
     );
   }
 

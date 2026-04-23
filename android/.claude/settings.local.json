@@ -12,7 +12,17 @@
       "Bash(./gradlew assembleDebug:*)",
       "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter devices:*)",
       "Bash(/Users/mahfuzahmed/Downloads/flutter/bin/flutter emulators:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(git push:*)",
+      "Bash(git checkout:*)",
+      "Bash(flutter devices:*)",
+      "Bash(/usr/libexec/java_home:*)",
+      "Bash(git stash show:*)",
+      "Bash(git stash pop:*)",
+      "Bash(adb:*)",
+      "Bash(/Users/mahfuzahmed/Library/Android/sdk/platform-tools/adb:*)",
+      "Bash(flutter build:*)",
+      "Bash(/Users/mahfuzahmed/flutter/bin/flutter build:*)"
     ]
   }
 }
