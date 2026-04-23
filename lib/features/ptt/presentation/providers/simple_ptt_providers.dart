@@ -475,6 +475,10 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
     _stopBroadcastTimer();
     _disableWakelock();
 
+    // Force stop all streaming connections before leaving room
+    debugPrint('SimplePTT: Disposing session for $channelId - stopping all connections');
+    _streamingService.forceStopAllConnections();
+
     if (_wsService.isConnected) {
       _wsService.leaveRoom(channelId);
     }

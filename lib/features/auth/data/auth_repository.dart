@@ -345,9 +345,12 @@ class AuthRepository {
 
   // Cache for FCM token to avoid redundant writes
   static String? _cachedFcmToken;
+  static DateTime? _lastFcmTokenUpdate;
+  // Only update FCM token once per day (saves writes)
+  static const Duration _fcmTokenUpdateInterval = Duration(hours: 24);
 
   /// Save FCM token to user document for push notifications
-  /// OPTIMIZED: Only writes if token has changed (saves Firestore writes)
+  /// OPTIMIZED: Only writes if token has changed AND interval has passed
   Future<void> saveFcmToken() async {
     final userId = _auth.currentUser?.uid;
     if (userId == null) return;
@@ -356,14 +359,20 @@ class AuthRepository {
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null) return;
 
-      // Skip write if token hasn't changed
-      if (_cachedFcmToken == token) {
-        Logger.d('FCM token unchanged, skipping write');
-        return;
+      final now = DateTime.now();
+
+      // Skip write if token hasn't changed AND we updated recently
+      if (_cachedFcmToken == token && _lastFcmTokenUpdate != null) {
+        final elapsed = now.difference(_lastFcmTokenUpdate!);
+        if (elapsed < _fcmTokenUpdateInterval) {
+          Logger.d('FCM token unchanged and recently updated, skipping write');
+          return;
+        }
       }
 
       // Update cache and write to Firestore
       _cachedFcmToken = token;
+      _lastFcmTokenUpdate = now;
       await _usersRef.doc(userId).update({
         'fcmToken': token,
         'fcmTokenUpdatedAt': FieldValue.serverTimestamp(),

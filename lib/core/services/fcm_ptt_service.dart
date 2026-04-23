@@ -215,12 +215,36 @@ class FcmPttService {
   }
 }
 
+/// Check if user is logged in by checking SharedPreferences
+/// This is needed in background isolate where Firebase Auth state is not available
+Future<bool> _isUserLoggedIn() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    // Check for the user ID stored during login
+    final userId = prefs.getString('firebase_user_id');
+    final isLoggedIn = userId != null && userId.isNotEmpty;
+    debugPrint('FCM Background: Login status check - userId: $userId, isLoggedIn: $isLoggedIn');
+    return isLoggedIn;
+  } catch (e) {
+    debugPrint('FCM Background: Error checking login status: $e');
+    // If we can't check, assume not logged in for safety
+    return false;
+  }
+}
+
 /// Top-level function to handle FCM background messages for PTT
 /// Must be a top-level function (not a class method)
 @pragma('vm:entry-point')
 Future<void> handleFcmPttBackgroundMessage(RemoteMessage message) async {
   debugPrint('FCM Background: Received message');
   debugPrint('FCM Background: Data: ${message.data}');
+
+  // Check if user is logged in before showing notifications
+  final isLoggedIn = await _isUserLoggedIn();
+  if (!isLoggedIn) {
+    debugPrint('FCM Background: User not logged in, skipping notification');
+    return;
+  }
 
   final data = message.data;
   final type = data['type'] as String? ?? '';

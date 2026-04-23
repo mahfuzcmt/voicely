@@ -8,8 +8,29 @@ final messageRepositoryProvider = Provider<MessageRepository>((ref) {
   return MessageRepository(FirebaseFirestore.instance);
 });
 
+/// COST OPTIMIZATION FLAGS
+/// Set these to control Firestore usage and costs
+class FirestoreCostConfig {
+  /// Enable/disable usage statistics logging
+  /// When FALSE: Saves ~60% of Firestore writes (6 writes per PTT transmission)
+  /// Recommended: FALSE for 50+ users, TRUE only if you need usage analytics
+  static const bool enableUsageLogging = false;
+
+  /// Enable/disable message storage in Firestore
+  /// When TRUE: Messages stored for replay feature (limited to last 5 per channel)
+  /// Audio files auto-cleanup keeps only last 5 per channel
+  static const bool enableMessageStorage = true;
+
+  /// Cache duration for last audio message (reduces repeated reads)
+  static const Duration messageCacheDuration = Duration(minutes: 5);
+}
+
 class MessageRepository {
   final FirebaseFirestore _firestore;
+
+  /// In-memory cache for last audio messages per channel
+  /// Reduces Firestore reads significantly
+  static final Map<String, _CachedMessage> _lastMessageCache = {};
 
   MessageRepository(this._firestore);
 
@@ -80,7 +101,8 @@ class MessageRepository {
   }
 
   /// Send an audio message (PTT transmission record)
-  Future<MessageModel> sendAudioMessage({
+  /// OPTIMIZED: Respects FirestoreCostConfig settings
+  Future<MessageModel?> sendAudioMessage({
     required String channelId,
     required String senderId,
     required String senderName,
@@ -88,7 +110,9 @@ class MessageRepository {
     required int durationSeconds,
     String? audioUrl,
   }) async {
-    final message = await sendMessage(
+    // Create message model (even if not storing to Firestore)
+    final message = MessageModel(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
       channelId: channelId,
       senderId: senderId,
       senderName: senderName,
@@ -96,23 +120,63 @@ class MessageRepository {
       type: MessageType.audio,
       audioDuration: durationSeconds,
       audioUrl: audioUrl,
+      timestamp: DateTime.now(),
     );
 
-    // Log usage for reporting (fire-and-forget, don't block message sending)
-    // NOTE: Set to false to disable usage logging and save Firestore writes
-    // When scaling to 1000+ users, consider moving this to Cloud Functions
-    const bool enableUsageLogging = true;
-    if (enableUsageLogging) {
-      _logVoiceUsage(
+    // Cache locally for replay feature (works even without Firestore storage)
+    _cacheLastMessage(channelId, message);
+
+    // Only store to Firestore if enabled (COST OPTIMIZATION)
+    if (FirestoreCostConfig.enableMessageStorage) {
+      final storedMessage = await sendMessage(
         channelId: channelId,
         senderId: senderId,
         senderName: senderName,
-        durationSeconds: durationSeconds,
-        messageId: message.id,
+        senderPhotoUrl: senderPhotoUrl,
+        type: MessageType.audio,
+        audioDuration: durationSeconds,
+        audioUrl: audioUrl,
       );
+
+      // Log usage only if both message storage AND usage logging are enabled
+      if (FirestoreCostConfig.enableUsageLogging) {
+        _logVoiceUsage(
+          channelId: channelId,
+          senderId: senderId,
+          senderName: senderName,
+          durationSeconds: durationSeconds,
+          messageId: storedMessage.id,
+        );
+      }
+
+      return storedMessage;
     }
 
+    debugPrint('MessageRepo: Message cached locally (Firestore storage disabled)');
     return message;
+  }
+
+  /// Cache last message for a channel (in-memory)
+  void _cacheLastMessage(String channelId, MessageModel message) {
+    _lastMessageCache[channelId] = _CachedMessage(
+      message: message,
+      cachedAt: DateTime.now(),
+    );
+    debugPrint('MessageRepo: Cached last message for channel $channelId');
+  }
+
+  /// Get cached message if still valid
+  MessageModel? _getCachedMessage(String channelId) {
+    final cached = _lastMessageCache[channelId];
+    if (cached == null) return null;
+
+    final age = DateTime.now().difference(cached.cachedAt);
+    if (age > FirestoreCostConfig.messageCacheDuration) {
+      _lastMessageCache.remove(channelId);
+      return null;
+    }
+
+    return cached.message;
   }
 
   /// Log voice usage for reporting purposes
@@ -224,10 +288,22 @@ class MessageRepository {
         });
   }
 
-  /// Get the LAST audio message only - ONE TIME fetch (saves reads)
-  /// Use this for auto-play feature instead of streaming
-  /// Only fetches 3 messages to minimize Firestore reads
+  /// Get the LAST audio message only - uses CACHE FIRST to save reads
+  /// OPTIMIZED: Returns cached message if available, only fetches from Firestore if needed
   Future<MessageModel?> getLastAudioMessage(String channelId) async {
+    // OPTIMIZATION: Check cache first (saves Firestore reads)
+    final cached = _getCachedMessage(channelId);
+    if (cached != null) {
+      debugPrint('MessageRepo: Returning cached last message for $channelId');
+      return cached;
+    }
+
+    // If message storage is disabled, no point querying Firestore
+    if (!FirestoreCostConfig.enableMessageStorage) {
+      debugPrint('MessageRepo: Message storage disabled, no cached message available');
+      return null;
+    }
+
     try {
       // Get only last 3 messages - most recent is usually audio in PTT app
       final snapshot = await _messagesRef
@@ -246,6 +322,8 @@ class MessageRepository {
         final message = MessageModel.fromFirestore(doc);
         if (message.type == MessageType.audio && message.audioUrl != null) {
           debugPrint('MessageRepo: Found last audio message ${message.id}');
+          // Cache it for next time
+          _cacheLastMessage(channelId, message);
           return message;
         }
       }
@@ -308,6 +386,11 @@ class MessageRepository {
 
   /// Get unread messages count for a channel
   Future<int> getUnreadCount(String channelId, String userId) async {
+    // Skip if message storage is disabled
+    if (!FirestoreCostConfig.enableMessageStorage) {
+      return 0;
+    }
+
     final snapshot = await _messagesRef
         .where('channelId', isEqualTo: channelId)
         .where('senderId', isNotEqualTo: userId)
@@ -315,4 +398,25 @@ class MessageRepository {
         .get();
     return snapshot.docs.length;
   }
+
+  /// Clear cache for a channel (call when leaving channel)
+  void clearCache(String channelId) {
+    _lastMessageCache.remove(channelId);
+  }
+
+  /// Clear all caches
+  void clearAllCaches() {
+    _lastMessageCache.clear();
+  }
+}
+
+/// Helper class for caching messages with timestamp
+class _CachedMessage {
+  final MessageModel message;
+  final DateTime cachedAt;
+
+  _CachedMessage({
+    required this.message,
+    required this.cachedAt,
+  });
 }

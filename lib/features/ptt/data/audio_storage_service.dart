@@ -14,10 +14,15 @@ class AudioStorageService {
   final FirebaseStorage _storage;
   static const _uuid = Uuid();
 
+  /// Maximum number of audio files to keep per channel
+  /// Older files are automatically deleted to save storage costs
+  static const int maxAudiosPerChannel = 5;
+
   AudioStorageService(this._storage);
 
   /// Upload audio file to Firebase Storage
   /// Returns the download URL on success, null on failure
+  /// OPTIMIZED: Automatically deletes old audios to keep only last 5
   Future<String?> uploadAudio({
     required String filePath,
     required String channelId,
@@ -29,8 +34,9 @@ class AudioStorageService {
         return null;
       }
 
-      // Generate unique ID for the audio file
-      final audioId = _uuid.v4();
+      // Generate unique ID with timestamp for sorting
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final audioId = '${timestamp}_${_uuid.v4().substring(0, 8)}';
       final storagePath = 'audio/$channelId/$audioId.m4a';
 
       Logger.d('Uploading audio to: $storagePath');
@@ -63,10 +69,49 @@ class AudioStorageService {
         Logger.w('Failed to delete temp file: $e');
       }
 
+      // COST OPTIMIZATION: Clean up old audios (keep only last 5)
+      _cleanupOldAudios(channelId);
+
       return downloadUrl;
     } catch (e) {
       Logger.e('Failed to upload audio', error: e);
       return null;
+    }
+  }
+
+  /// Delete old audio files, keeping only the most recent ones
+  /// Runs in background (fire-and-forget) to not block upload
+  Future<void> _cleanupOldAudios(String channelId) async {
+    try {
+      final channelRef = _storage.ref().child('audio/$channelId');
+      final listResult = await channelRef.listAll();
+
+      if (listResult.items.length <= maxAudiosPerChannel) {
+        Logger.d('AudioStorage: Channel has ${listResult.items.length} audios, no cleanup needed');
+        return;
+      }
+
+      // Sort by name (contains timestamp) - oldest first
+      final sortedItems = listResult.items.toList()
+        ..sort((a, b) => a.name.compareTo(b.name));
+
+      // Delete oldest files, keep only last 5
+      final itemsToDelete = sortedItems.length - maxAudiosPerChannel;
+      Logger.d('AudioStorage: Deleting $itemsToDelete old audios from channel $channelId');
+
+      for (var i = 0; i < itemsToDelete; i++) {
+        try {
+          await sortedItems[i].delete();
+          Logger.d('AudioStorage: Deleted old audio: ${sortedItems[i].name}');
+        } catch (e) {
+          Logger.w('AudioStorage: Failed to delete ${sortedItems[i].name}: $e');
+        }
+      }
+
+      Logger.d('AudioStorage: Cleanup complete, kept last $maxAudiosPerChannel audios');
+    } catch (e) {
+      // Don't fail the upload if cleanup fails
+      Logger.w('AudioStorage: Cleanup failed (non-critical): $e');
     }
   }
 
