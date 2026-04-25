@@ -249,43 +249,51 @@ Future<void> handleFcmPttBackgroundMessage(RemoteMessage message) async {
   final data = message.data;
   final type = data['type'] as String? ?? '';
 
-  // Show notification for live broadcast when app is in background/killed
-  if (type == 'live_broadcast_started') {
-    final speakerName = data['speakerName'] as String? ?? 'Someone';
-    final channelName = data['channelName'] as String? ?? 'a channel';
-    final channelId = data['channelId'] as String? ?? '';
+  final speakerName = data['speakerName'] as String? ?? data['senderName'] as String? ?? 'Someone';
+  final channelName = data['channelName'] as String? ?? 'a channel';
+  final channelId = data['channelId'] as String? ?? '';
 
+  // FIRST: Show notification BEFORE audio playback for better UX
+  if (type == 'live_broadcast_started') {
     await _showLiveBroadcastNotification(
       speakerName: speakerName,
       channelName: channelName,
       channelId: channelId,
     );
+  } else if (type == 'voice_message') {
+    // Also show notification for voice messages
+    await _showVoiceMessageNotification(
+      senderName: speakerName,
+      channelName: channelName,
+      channelId: channelId,
+    );
   }
 
-  // Auto-play voice messages in background (only once per message)
+  // SECOND: Auto-play voice messages in background (only once per message per channel)
   final audioUrl = data['audioUrl'] as String?;
   final messageId = data['messageId'] as String?;
   if (audioUrl != null && messageId != null) {
-    // Check if already played (persisted across isolates)
+    // Check if already played on THIS channel (per-channel cache)
+    final cacheKey = '${channelId}_$messageId';
     final lastPlayedId = await getLastAutoPlayedMessageId();
-    if (messageId != lastPlayedId) {
+    if (cacheKey != lastPlayedId) {
       // Mark as played BEFORE playing to prevent race conditions
-      await setLastAutoPlayedMessageId(messageId);
-      debugPrint('FCM Background: Auto-playing voice message $messageId');
+      await setLastAutoPlayedMessageId(cacheKey);
+      debugPrint('FCM Background: Auto-playing voice message $messageId on channel $channelId');
 
       final audioService = BackgroundAudioService();
       await audioService.initialize();
       await audioService.playAudio(
         audioUrl: audioUrl,
-        senderName: data['senderName'] as String? ?? 'Someone',
-        channelName: data['channelName'] as String? ?? 'Channel',
+        senderName: speakerName,
+        channelName: channelName,
       );
     } else {
-      debugPrint('FCM Background: Message $messageId already played, skipping');
+      debugPrint('FCM Background: Message $messageId already played on channel $channelId, skipping');
     }
   }
 
-  // Handle the PTT message
+  // Handle the PTT message (emit to streams)
   final fcmService = FcmPttService();
   await fcmService.handleMessage(message);
 }
@@ -370,4 +378,84 @@ Future<void> _showLiveBroadcastNotification({
   );
 
   debugPrint('FCM Background: Notification shown');
+}
+
+/// Show a notification for voice messages (before auto-playing)
+Future<void> _showVoiceMessageNotification({
+  required String senderName,
+  required String channelName,
+  required String channelId,
+}) async {
+  debugPrint('FCM Background: Showing voice message notification from $senderName in $channelName');
+
+  final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+
+  // Initialize notifications
+  const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const iosSettings = DarwinInitializationSettings(
+    requestSoundPermission: true,
+    requestBadgePermission: true,
+    requestAlertPermission: true,
+  );
+  const initSettings = InitializationSettings(
+    android: androidSettings,
+    iOS: iosSettings,
+  );
+
+  await flutterLocalNotificationsPlugin.initialize(initSettings);
+
+  // Create notification channel for Android
+  const androidChannel = AndroidNotificationChannel(
+    'voicely_voice_messages',
+    'Voice Messages',
+    description: 'Notifications for voice messages',
+    importance: Importance.high,
+    playSound: false, // Don't play sound - audio will play
+    enableVibration: true,
+  );
+
+  await flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(androidChannel);
+
+  // Show the notification (no sound - audio will play instead)
+  final androidDetails = AndroidNotificationDetails(
+    'voicely_voice_messages',
+    'Voice Messages',
+    channelDescription: 'Notifications for voice messages',
+    importance: Importance.high,
+    priority: Priority.high,
+    showWhen: true,
+    autoCancel: true,
+    category: AndroidNotificationCategory.message,
+    visibility: NotificationVisibility.public,
+    playSound: false, // Audio will play separately
+    enableVibration: true,
+    vibrationPattern: Int64List.fromList([0, 200, 100, 200]),
+    ongoing: false,
+    colorized: true,
+    color: const Color(0xFF2196F3), // Blue color for voice messages
+  );
+
+  const iosDetails = DarwinNotificationDetails(
+    presentAlert: true,
+    presentBadge: true,
+    presentSound: false, // Audio will play separately
+    interruptionLevel: InterruptionLevel.active,
+  );
+
+  final notificationDetails = NotificationDetails(
+    android: androidDetails,
+    iOS: iosDetails,
+  );
+
+  await flutterLocalNotificationsPlugin.show(
+    (channelId.hashCode + 1), // Different ID from live broadcast
+    'Voice message from $senderName',
+    'Playing in $channelName',
+    notificationDetails,
+    payload: channelId,
+  );
+
+  debugPrint('FCM Background: Voice message notification shown');
 }

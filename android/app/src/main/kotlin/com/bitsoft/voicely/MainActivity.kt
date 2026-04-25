@@ -629,27 +629,17 @@ class MainActivity : FlutterActivity() {
                 android.util.Log.e("VoicelyAudio", "Failed to set speakerphone: ${e.message}", e)
             }
 
-            // Ensure minimum voice volume for audible playback
-            android.util.Log.d("VoicelyAudio", "Step 4: Checking and ensuring minimum voice volume...")
+            // Log current volume levels (respect user's device volume setting)
+            android.util.Log.d("VoicelyAudio", "Step 4: Checking volume levels (respecting user settings)...")
             try {
                 val voiceVolume = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
                 val maxVoiceVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
                 val musicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
                 val maxMusicVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                android.util.Log.d("VoicelyAudio", "Voice volume: $voiceVolume/$maxVoiceVolume, Music volume: $musicVolume/$maxMusicVolume")
-
-                // Ensure minimum voice volume (at least 50% of max) for WebRTC audio
-                val minVoiceVolume = (maxVoiceVolume * 0.5).toInt()
-                if (voiceVolume < minVoiceVolume) {
-                    audioManager.setStreamVolume(
-                        AudioManager.STREAM_VOICE_CALL,
-                        minVoiceVolume,
-                        0 // No flags (silent change)
-                    )
-                    android.util.Log.d("VoicelyAudio", "Voice volume was too low ($voiceVolume), increased to $minVoiceVolume")
-                }
+                android.util.Log.d("VoicelyAudio", "Voice volume: $voiceVolume/$maxVoiceVolume, Music volume: $musicVolume/$maxMusicVolume (respecting user setting)")
+                // NOTE: Volume is NOT forced - respecting user's device volume preference
             } catch (e: Exception) {
-                android.util.Log.e("VoicelyAudio", "Failed to get/set volume: ${e.message}", e)
+                android.util.Log.e("VoicelyAudio", "Failed to get volume: ${e.message}", e)
             }
 
             android.util.Log.d("VoicelyAudio", "Step 5: Checking Bluetooth status...")

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'native_audio_service.dart';
 
@@ -44,28 +45,32 @@ class BackgroundAudioService {
     // Initialize audio player
     _audioPlayer = AudioPlayer();
 
-    // Configure audio session for playback even when screen is locked
+    // Configure audio session for EXCLUSIVE playback even when screen is locked
+    // This ensures PTT voice messages are heard clearly without ducking
     final session = await AudioSession.instance;
     await session.configure(const AudioSessionConfiguration(
       avAudioSessionCategory: AVAudioSessionCategory.playback,
-      avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.mixWithOthers,
-      avAudioSessionMode: AVAudioSessionMode.defaultMode,
+      avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.duckOthers,
+      avAudioSessionMode: AVAudioSessionMode.spokenAudio, // Optimized for voice
       avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
-      avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
+      avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.notifyOthersOnDeactivation,
       androidAudioAttributes: AndroidAudioAttributes(
         contentType: AndroidAudioContentType.speech,
-        usage: AndroidAudioUsage.media,
+        usage: AndroidAudioUsage.voiceCommunication, // Higher priority for PTT
         flags: AndroidAudioFlags.audibilityEnforced,
       ),
-      androidAudioFocusGainType: AndroidAudioFocusGainType.gainTransientMayDuck,
+      androidAudioFocusGainType: AndroidAudioFocusGainType.gain, // Exclusive focus
       androidWillPauseWhenDucked: false,
     ));
+
+    // Activate the session immediately
+    await session.setActive(true);
 
     _isInitialized = true;
     debugPrint('BackgroundAudioService: Initialized');
   }
 
-  /// Play audio from URL (works in background)
+  /// Play audio from URL (works in background with screen off)
   Future<void> playAudio({
     required String audioUrl,
     required String senderName,
@@ -76,25 +81,57 @@ class BackgroundAudioService {
     try {
       debugPrint('BackgroundAudioService: Playing audio from $audioUrl');
 
-      // Set audio mode for loud speaker playback (Android only)
-      if (Platform.isAndroid) {
-        await NativeAudioService.setAudioModeForPlayback();
-        // Small delay to ensure audio mode change takes effect
-        await Future.delayed(const Duration(milliseconds: 100));
+      // FIRST: Enable wakelock to keep CPU active during playback
+      try {
+        await WakelockPlus.enable();
+        debugPrint('BackgroundAudioService: Wakelock enabled for playback');
+      } catch (e) {
+        debugPrint('BackgroundAudioService: Wakelock enable failed: $e');
       }
 
-      // Play audio (no notification)
+      // SECOND: Set audio mode BEFORE starting playback (critical for proper routing)
+      if (Platform.isAndroid) {
+        await NativeAudioService.setAudioModeForPlayback();
+        // Delay to ensure audio mode change takes effect before playback
+        await Future.delayed(const Duration(milliseconds: 150));
+      }
+
+      // THIRD: Stop any existing playback
       await _audioPlayer?.stop();
+
+      // FOURTH: Load and play audio
       await _audioPlayer?.setUrl(audioUrl);
       await _audioPlayer?.play();
+
+      // Listen for completion to release wakelock
+      _audioPlayer?.playerStateStream.listen((state) {
+        if (state.processingState == ProcessingState.completed ||
+            state.processingState == ProcessingState.idle) {
+          _releaseWakelock();
+        }
+      });
+
+      debugPrint('BackgroundAudioService: Audio playback started');
     } catch (e) {
       debugPrint('BackgroundAudioService: Error playing audio: $e');
+      _releaseWakelock();
+    }
+  }
+
+  /// Release wakelock when playback completes
+  Future<void> _releaseWakelock() async {
+    try {
+      await WakelockPlus.disable();
+      debugPrint('BackgroundAudioService: Wakelock released');
+    } catch (e) {
+      debugPrint('BackgroundAudioService: Wakelock release failed: $e');
     }
   }
 
   /// Stop playback
   Future<void> stop() async {
     await _audioPlayer?.stop();
+    await _releaseWakelock();
   }
 
   /// Pause playback
@@ -125,6 +162,7 @@ class BackgroundAudioService {
     await _audioPlayer?.dispose();
     _audioPlayer = null;
     _isInitialized = false;
+    await _releaseWakelock();
   }
 }
 

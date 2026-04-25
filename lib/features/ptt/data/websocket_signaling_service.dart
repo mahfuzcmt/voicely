@@ -777,27 +777,63 @@ class WebSocketSignalingService {
           break;
 
         case WSMessageType.webrtcIce:
+          // Validate ICE candidate fields before adding
+          final iceRoomId = json['roomId'] as String?;
+          final iceFromUserId = json['fromUserId'] as String?;
+          final iceCandidate = json['candidate'] as String?;
+          final iceSdpMid = json['sdpMid'] as String?;
+          final iceSdpMLineIndex = json['sdpMLineIndex'] as int?;
+
+          if (iceRoomId == null || iceFromUserId == null ||
+              iceCandidate == null || iceSdpMid == null || iceSdpMLineIndex == null) {
+            debugPrint('WS: Invalid ICE candidate - missing required fields');
+            break;
+          }
+
           _webrtcIceController.add((
-            roomId: json['roomId'] as String,
-            fromUserId: json['fromUserId'] as String,
-            candidate: json['candidate'] as String,
-            sdpMid: json['sdpMid'] as String,
-            sdpMLineIndex: json['sdpMLineIndex'] as int,
+            roomId: iceRoomId,
+            fromUserId: iceFromUserId,
+            candidate: iceCandidate,
+            sdpMid: iceSdpMid,
+            sdpMLineIndex: iceSdpMLineIndex,
           ));
           break;
 
         case WSMessageType.webrtcIceBatch:
-          final roomId = json['roomId'] as String;
-          final fromUserId = json['fromUserId'] as String;
-          final candidates = json['candidates'] as List;
+          final roomId = json['roomId'] as String?;
+          final fromUserId = json['fromUserId'] as String?;
+          final candidates = json['candidates'] as List?;
+
+          // Validate required fields
+          if (roomId == null || fromUserId == null || candidates == null) {
+            debugPrint('WS: Invalid ICE batch - missing required fields');
+            break;
+          }
+
           for (final c in candidates) {
-            final candidate = c as Map<String, dynamic>;
+            // Skip null or invalid candidates
+            if (c == null || c is! Map<String, dynamic>) {
+              debugPrint('WS: Skipping invalid ICE candidate in batch');
+              continue;
+            }
+            final candidate = c;
+
+            // Validate candidate fields before adding
+            final candidateStr = candidate['candidate'] as String?;
+            final sdpMid = candidate['sdpMid'] as String?;
+            final sdpMLineIndex = candidate['sdpMLineIndex'] as int?;
+
+            if (candidateStr == null || sdpMid == null || sdpMLineIndex == null) {
+              debugPrint('WS: Skipping ICE candidate with null fields');
+              continue;
+            }
+
             _webrtcIceController.add((
               roomId: roomId,
               fromUserId: fromUserId,
-              candidate: candidate['candidate'] as String,
-              sdpMid: candidate['sdpMid'] as String,
-              sdpMLineIndex: candidate['sdpMLineIndex'] as int,
+              candidate: candidateStr,
+              sdpMid: sdpMid,
+              sdpMLineIndex: sdpMLineIndex,
             ));
           }
           break;

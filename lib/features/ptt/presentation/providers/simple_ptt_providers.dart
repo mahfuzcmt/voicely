@@ -475,8 +475,12 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
     _stopBroadcastTimer();
     _disableWakelock();
 
-    // Force stop all streaming connections before leaving room
-    debugPrint('SimplePTT: Disposing session for $channelId - stopping all connections');
+    // IMMEDIATELY stop all audio (sync) before async cleanup
+    // This ensures no audio plays from old channel when switching
+    debugPrint('SimplePTT: Disposing session for $channelId - stopping all audio immediately');
+    _streamingService.stopAllAudioImmediately();
+
+    // Schedule async cleanup (peer connections, streams disposal)
     _streamingService.forceStopAllConnections();
 
     if (_wsService.isConnected) {

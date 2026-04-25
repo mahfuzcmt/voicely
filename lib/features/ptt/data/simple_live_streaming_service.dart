@@ -71,6 +71,12 @@ class SimpleLiveStreamingService {
   static const Duration _minBroadcastDuration = Duration(milliseconds: 800);
   DateTime? _broadcastStartTime;
 
+  // Audio flow verification
+  Timer? _audioFlowTimer;
+  int _lastBytesReceived = 0;
+  int _silentCheckCount = 0;
+  static const int _maxSilentChecks = 3; // 3 seconds of silence = problem
+
   // Controllers
   final _stateController =
       StreamController<SimpleLiveStreamingState>.broadcast();
@@ -78,6 +84,10 @@ class SimpleLiveStreamingService {
   final _speakerController =
       StreamController<({String? id, String? name})>.broadcast();
   final _listenerCountController = StreamController<int>.broadcast();
+  final _audioFlowController = StreamController<bool>.broadcast();
+
+  /// Stream indicating whether audio is actually flowing (not just connected)
+  Stream<bool> get audioFlowStream => _audioFlowController.stream;
 
   // Streams
   Stream<SimpleLiveStreamingState> get stateStream => _stateController.stream;
@@ -102,12 +112,22 @@ class SimpleLiveStreamingService {
   }
 
   /// Set muted state for incoming audio
+  /// Safe against race conditions during disposal
   void setMuted(bool muted) {
     _isMuted = muted;
-    if (_remoteStream != null) {
-      for (final track in _remoteStream!.getAudioTracks()) {
+
+    // Capture reference to avoid race condition with disposal
+    final stream = _remoteStream;
+    if (stream == null) return;
+
+    try {
+      final tracks = stream.getAudioTracks();
+      for (final track in tracks) {
         track.enabled = !muted;
       }
+    } catch (e) {
+      // Stream may have been disposed between null check and usage
+      debugPrint('SimpleStream: setMuted error (stream may be disposed): $e');
     }
   }
 
@@ -280,15 +300,47 @@ class SimpleLiveStreamingService {
     await _disposeLocalStream();
   }
 
+  /// Immediately stop all audio playback (synchronous - for fast channel switching)
+  void stopAllAudioImmediately() {
+    debugPrint('SimpleStream: Immediately stopping all audio');
+
+    // Disable remote audio tracks immediately (stops incoming audio)
+    if (_remoteStream != null) {
+      for (final track in _remoteStream!.getAudioTracks()) {
+        track.enabled = false;
+      }
+    }
+
+    // Disable local audio tracks immediately (stops outgoing audio)
+    if (_localStream != null) {
+      for (final track in _localStream!.getAudioTracks()) {
+        track.enabled = false;
+      }
+    }
+
+    _isBroadcasting = false;
+    _broadcastStartTime = null;
+  }
+
+  /// Schedule async cleanup without blocking
+  /// This prevents race conditions by running cleanup in next event loop cycle
+  void _scheduleCleanup() {
+    Future.microtask(() async {
+      try {
+        await _closeAllPeerConnections();
+        await _disposeLocalStream();
+      } catch (e) {
+        debugPrint('SimpleStream: Scheduled cleanup error: $e');
+      }
+    });
+  }
+
   /// Force stop all connections
   Future<void> forceStopAllConnections() async {
     debugPrint('SimpleStream: Force stopping all connections');
 
-    if (_isBroadcasting) {
-      _isBroadcasting = false;
-      _broadcastStartTime = null;
-      _setLocalAudioEnabled(false);
-    }
+    // IMMEDIATELY disable all audio tracks (sync) before async cleanup
+    stopAllAudioImmediately();
 
     await _closeAllPeerConnections();
     await _disposeLocalStream();
@@ -299,12 +351,13 @@ class SimpleLiveStreamingService {
   }
 
   /// Handle floor state changes
+  /// Uses async cleanup to prevent race conditions
   void _handleFloorStateChange(WSFloorState? floor) {
     _floorRequestTimeout?.cancel();
     _floorRequestTimeout = null;
 
     if (floor == null) {
-      // Floor released
+      // Floor released - stop audio IMMEDIATELY then cleanup async
       _currentSpeakerId = null;
       _speakerController.add((id: null, name: null));
 
@@ -313,11 +366,14 @@ class SimpleLiveStreamingService {
         _isBroadcasting = false;
         _broadcastStartTime = null;
         _updateState(SimpleLiveStreamingState.idle);
-        _closeAllPeerConnections();
-        _disposeLocalStream();
+        // Stop audio immediately, then schedule async cleanup
+        stopAllAudioImmediately();
+        _scheduleCleanup();
       } else {
-        _closeAllPeerConnections();
+        // As listener, stop incoming audio immediately
+        stopAllAudioImmediately();
         _updateState(SimpleLiveStreamingState.idle);
+        _scheduleCleanup();
       }
       return;
     }
@@ -334,11 +390,11 @@ class SimpleLiveStreamingService {
       _setLocalAudioEnabled(true);
       _startStreamingToListeners();
     } else {
-      // Someone else is speaking
+      // Someone else is speaking - cleanup our broadcast if we were broadcasting
       debugPrint('SimpleStream: ${floor.speakerName} is speaking');
       if (_isBroadcasting) {
-        _closeAllPeerConnections();
-        _disposeLocalStream();
+        stopAllAudioImmediately();
+        _scheduleCleanup();
         _broadcastStartTime = null;
       }
       _isBroadcasting = false;
@@ -510,6 +566,9 @@ class SimpleLiveStreamingService {
     }
   }
 
+  // Maximum ICE candidates to queue per peer (prevents memory leak)
+  static const int _maxPendingIceCandidates = 50;
+
   /// Handle incoming ICE candidate
   Future<void> _handleIncomingIceCandidate(
     String fromUserId,
@@ -521,16 +580,22 @@ class SimpleLiveStreamingService {
 
     final pc = _peerConnections[fromUserId];
     if (pc == null) {
-      // Store pending candidate for this peer
+      // Store pending candidate for this peer (with bounds)
       _pendingIceCandidates.putIfAbsent(fromUserId, () => []);
-      _pendingIceCandidates[fromUserId]!.add(iceCandidate);
+      if (_pendingIceCandidates[fromUserId]!.length < _maxPendingIceCandidates) {
+        _pendingIceCandidates[fromUserId]!.add(iceCandidate);
+      } else {
+        debugPrint('SimpleStream: ICE queue full for $fromUserId, dropping candidate');
+      }
       return;
     }
 
     final remoteDesc = await pc.getRemoteDescription();
     if (remoteDesc == null) {
       _pendingIceCandidates.putIfAbsent(fromUserId, () => []);
-      _pendingIceCandidates[fromUserId]!.add(iceCandidate);
+      if (_pendingIceCandidates[fromUserId]!.length < _maxPendingIceCandidates) {
+        _pendingIceCandidates[fromUserId]!.add(iceCandidate);
+      }
       return;
     }
 
@@ -609,6 +674,9 @@ class SimpleLiveStreamingService {
 
         _remoteStreamController.add(stream);
         debugPrint('SimpleStream: Remote audio stream ready');
+
+        // Start audio flow verification for this peer
+        _startAudioFlowVerification(pc, peerId);
       }
     };
 
@@ -632,10 +700,57 @@ class SimpleLiveStreamingService {
     return pc;
   }
 
+  /// Start monitoring audio flow using RTP stats
+  /// Detects "silent audio" where connection exists but no audio flows
+  void _startAudioFlowVerification(RTCPeerConnection pc, String peerId) {
+    _stopAudioFlowVerification();
+    _lastBytesReceived = 0;
+    _silentCheckCount = 0;
+
+    _audioFlowTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
+      try {
+        final stats = await pc.getStats();
+        int totalBytesReceived = 0;
+
+        for (final report in stats) {
+          if (report.type == 'inbound-rtp' && report.values['kind'] == 'audio') {
+            totalBytesReceived += (report.values['bytesReceived'] as int?) ?? 0;
+          }
+        }
+
+        if (totalBytesReceived > _lastBytesReceived) {
+          // Audio is flowing
+          _silentCheckCount = 0;
+          _audioFlowController.add(true);
+          debugPrint('SimpleStream: Audio flowing from $peerId (${totalBytesReceived - _lastBytesReceived} bytes)');
+        } else {
+          // No new audio bytes
+          _silentCheckCount++;
+          if (_silentCheckCount >= _maxSilentChecks) {
+            debugPrint('SimpleStream: WARNING - No audio flow from $peerId for $_silentCheckCount seconds');
+            _audioFlowController.add(false);
+          }
+        }
+
+        _lastBytesReceived = totalBytesReceived;
+      } catch (e) {
+        debugPrint('SimpleStream: Error checking audio flow: $e');
+      }
+    });
+  }
+
+  /// Stop audio flow verification
+  void _stopAudioFlowVerification() {
+    _audioFlowTimer?.cancel();
+    _audioFlowTimer = null;
+    _silentCheckCount = 0;
+  }
+
   /// Close peer connection for a specific peer
   Future<void> _closePeerConnectionFor(String peerId) async {
     _pendingIceCandidates.remove(peerId);
     _connectedListeners.remove(peerId);
+    _stopAudioFlowVerification();
 
     final pc = _peerConnections.remove(peerId);
     if (pc != null) {
@@ -657,6 +772,7 @@ class SimpleLiveStreamingService {
 
   /// Close all peer connections
   Future<void> _closeAllPeerConnections() async {
+    _stopAudioFlowVerification();
     _pendingIceCandidates.clear();
     _connectedListeners.clear();
 
@@ -739,5 +855,6 @@ class SimpleLiveStreamingService {
     await _remoteStreamController.close();
     await _speakerController.close();
     await _listenerCountController.close();
+    await _audioFlowController.close();
   }
 }
