@@ -59,6 +59,7 @@ class SimpleLiveStreamingService {
   StreamSubscription? _floorDeniedSubscription;
   StreamSubscription? _connectionSubscription;
   StreamSubscription? _memberJoinedSubscription;
+  StreamSubscription? _offerRequestSubscription;
   Timer? _floorRequestTimeout;
 
   // State
@@ -76,6 +77,13 @@ class SimpleLiveStreamingService {
   int _lastBytesReceived = 0;
   int _silentCheckCount = 0;
   static const int _maxSilentChecks = 3; // 3 seconds of silence = problem
+
+  // Listening timeout - if no audio track received within this time, something is wrong
+  Timer? _listeningTimeoutTimer;
+  static const Duration _listeningTimeout = Duration(seconds: 5);
+  bool _hasReceivedAudioTrack = false;
+  int _offerRetryCount = 0;
+  static const int _maxOfferRetries = 2;
 
   // Controllers
   final _stateController =
@@ -193,6 +201,14 @@ class SimpleLiveStreamingService {
             await _createAndSendOffer(member.userId);
           }
         }
+      }
+    });
+
+    // Listen for offer requests from listeners who didn't receive our offer
+    _offerRequestSubscription = _wsService.webrtcOfferRequests.listen((event) async {
+      if (event.roomId == channelId && _isBroadcasting && _localStream != null) {
+        debugPrint('SimpleStream: Listener ${event.fromUserId} requested offer - resending');
+        await _createAndSendOffer(event.fromUserId);
       }
     });
   }
@@ -360,6 +376,9 @@ class SimpleLiveStreamingService {
       // Floor released - stop audio IMMEDIATELY then cleanup async
       _currentSpeakerId = null;
       _speakerController.add((id: null, name: null));
+      _cancelListeningTimeout();
+      _hasReceivedAudioTrack = false;
+      _offerRetryCount = 0;
 
       if (_isBroadcasting) {
         _setLocalAudioEnabled(false);
@@ -398,8 +417,53 @@ class SimpleLiveStreamingService {
         _broadcastStartTime = null;
       }
       _isBroadcasting = false;
+      _hasReceivedAudioTrack = false;
+      _offerRetryCount = 0;
       _updateState(SimpleLiveStreamingState.listening);
+
+      // Start timeout to detect if we don't receive audio
+      _startListeningTimeout(floor.speakerId);
     }
+  }
+
+  /// Start a timeout to detect if we don't receive audio while "listening"
+  void _startListeningTimeout(String speakerId) {
+    _cancelListeningTimeout();
+
+    _listeningTimeoutTimer = Timer(_listeningTimeout, () {
+      if (_state == SimpleLiveStreamingState.listening && !_hasReceivedAudioTrack) {
+        debugPrint('SimpleStream: TIMEOUT - No audio received after $_listeningTimeout, requesting offer from $speakerId');
+        _requestOfferFromSpeaker(speakerId);
+      }
+    });
+  }
+
+  /// Cancel listening timeout
+  void _cancelListeningTimeout() {
+    _listeningTimeoutTimer?.cancel();
+    _listeningTimeoutTimer = null;
+  }
+
+  /// Request offer from speaker when we haven't received one
+  void _requestOfferFromSpeaker(String speakerId) {
+    if (_offerRetryCount >= _maxOfferRetries) {
+      debugPrint('SimpleStream: Max offer retries reached ($_maxOfferRetries), giving up');
+      return;
+    }
+
+    _offerRetryCount++;
+    debugPrint('SimpleStream: Requesting offer from speaker (attempt $_offerRetryCount/$_maxOfferRetries)');
+
+    // Send a request_offer message to ask the speaker to send us an offer
+    _wsService.requestWebRtcOffer(channelId, speakerId);
+
+    // Set another timeout in case this request also fails
+    _listeningTimeoutTimer = Timer(_listeningTimeout, () {
+      if (_state == SimpleLiveStreamingState.listening && !_hasReceivedAudioTrack) {
+        debugPrint('SimpleStream: Still no audio after retry $_offerRetryCount');
+        _requestOfferFromSpeaker(speakerId);
+      }
+    });
   }
 
   /// Handle floor denied
@@ -666,6 +730,11 @@ class SimpleLiveStreamingService {
         final stream = event.streams.first;
         _remoteStream = stream;
 
+        // Mark that we've received audio - cancel the timeout
+        _hasReceivedAudioTrack = true;
+        _cancelListeningTimeout();
+        debugPrint('SimpleStream: Audio track received! Cancelling timeout.');
+
         // Enable audio track
         event.track.enabled = !_isMuted;
         for (final track in stream.getAudioTracks()) {
@@ -833,6 +902,7 @@ class SimpleLiveStreamingService {
     Logger.d('Disposing SimpleLiveStreamingService');
 
     _floorRequestTimeout?.cancel();
+    _cancelListeningTimeout();
 
     await _offerSubscription?.cancel();
     await _answerSubscription?.cancel();
@@ -841,6 +911,7 @@ class SimpleLiveStreamingService {
     await _floorDeniedSubscription?.cancel();
     await _connectionSubscription?.cancel();
     await _memberJoinedSubscription?.cancel();
+    await _offerRequestSubscription?.cancel();
 
     await _closeAllPeerConnections();
     await _disposeLocalStream();
