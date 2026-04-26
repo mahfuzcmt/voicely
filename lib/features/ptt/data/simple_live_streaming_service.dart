@@ -331,6 +331,10 @@ class SimpleLiveStreamingService {
   Future<bool> startBroadcasting() async {
     if (_isBroadcasting) return false;
 
+    // CRITICAL: Set this channel as active when user starts broadcasting
+    // This ensures floor grant events are not ignored
+    setAsActiveChannel();
+
     _updateState(SimpleLiveStreamingState.connecting);
 
     // Initialize local stream
