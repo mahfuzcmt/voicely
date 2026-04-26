@@ -36,10 +36,17 @@ class AppConstants {
   static const Duration floorRequestTimeout = Duration(seconds: 2); // Reduced from 5s for faster connection
 
   // WebRTC ICE servers configuration
-  // IMPORTANT: Order matters! Primary TURN server first for faster connections
-  // UDP-only first for speed (TCP fallback is slower)
+  // IMPORTANT: Order matters! STUN first for direct connections, then TURN for relay
+  // Using 'all' transport policy allows direct connections when possible
   static const List<Map<String, dynamic>> iceServers = [
-    // Primary: Your coturn TURN server (most reliable for your setup)
+    // Google STUN servers - for direct connections (fastest if both parties have good NAT)
+    {
+      'urls': [
+        'stun:stun.l.google.com:19302',
+        'stun:stun1.l.google.com:19302',
+      ],
+    },
+    // Primary: Your coturn TURN server (relay when direct fails)
     // UDP only first for faster connection (no TCP fallback overhead)
     {
       'urls': [

@@ -39,6 +39,31 @@ class SimpleLiveStreamingService {
   final String channelId;
   final WebSocketSignalingService _wsService;
 
+  /// CRITICAL: Track the currently active PTT channel globally
+  /// Only the service for this channel should process incoming audio
+  /// This prevents cross-channel audio leak when multiple services exist
+  static String? _activeChannelId;
+
+  /// Set this channel as the active PTT channel
+  /// Called when user enters this channel's PTT screen
+  void setAsActiveChannel() {
+    if (_activeChannelId != channelId) {
+      debugPrint('SimpleStream: Setting $channelId as active channel (was: $_activeChannelId)');
+      _activeChannelId = channelId;
+    }
+  }
+
+  /// Check if this channel is currently active
+  bool get isActiveChannel => _activeChannelId == channelId;
+
+  /// Clear active channel (called on dispose)
+  void _clearActiveChannelIfSelf() {
+    if (_activeChannelId == channelId) {
+      debugPrint('SimpleStream: Clearing active channel $channelId');
+      _activeChannelId = null;
+    }
+  }
+
   // WebRTC state - multiple peer connections for broadcasting to all listeners
   MediaStream? _localStream;
   final Map<String, RTCPeerConnection> _peerConnections = {};
@@ -80,10 +105,17 @@ class SimpleLiveStreamingService {
 
   // Listening timeout - if no audio track received within this time, something is wrong
   Timer? _listeningTimeoutTimer;
+  Timer? _earlyOfferCheckTimer; // NEW: Check early if no offer arrives
   static const Duration _listeningTimeout = Duration(seconds: 5);
+  static const Duration _earlyOfferCheckDelay = Duration(seconds: 2); // NEW: Check after 2s
   bool _hasReceivedAudioTrack = false;
+  bool _hasReceivedOffer = false; // NEW: Track if offer was received
   int _offerRetryCount = 0;
-  static const int _maxOfferRetries = 2;
+  static const int _maxOfferRetries = 3; // Increased from 2 to 3 for better recovery
+
+  // Track audio flow recovery attempts separately from initial offer retries
+  int _silentAudioRecoveryCount = 0;
+  static const int _maxSilentAudioRecoveries = 2;
 
   // Controllers
   final _stateController =
@@ -112,11 +144,47 @@ class SimpleLiveStreamingService {
   String? get currentSpeakerId => _currentSpeakerId;
   int get activeListenerCount => _connectedListeners.length;
 
+  // Track if audio system has been pre-warmed for this session
+  bool _isAudioPreWarmed = false;
+
   SimpleLiveStreamingService({
     required this.channelId,
     required WebSocketSignalingService wsService,
   }) : _wsService = wsService {
+    // Set this as the active channel immediately
+    setAsActiveChannel();
     _setupListeners();
+    // Pre-warm audio system on service creation
+    _preWarmAudioSystem();
+  }
+
+  /// Pre-warm the audio system when service is created
+  /// This ensures audio mode is ready BEFORE the first broadcast arrives
+  Future<void> _preWarmAudioSystem() async {
+    if (_isAudioPreWarmed) return;
+
+    try {
+      debugPrint('SimpleStream: Pre-warming audio system for channel $channelId');
+      // Configure audio mode proactively - this primes the Android AudioManager
+      // so the first broadcast doesn't have cold-start latency
+      await NativeAudioService.setAudioModeForVoiceChat();
+      await NativeAudioService.setSpeakerOn(true);
+      _isAudioPreWarmed = true;
+      debugPrint('SimpleStream: Audio system pre-warmed successfully');
+    } catch (e) {
+      debugPrint('SimpleStream: Audio pre-warm error (non-fatal): $e');
+      // Non-fatal - will retry when broadcast arrives
+    }
+  }
+
+  /// Re-warm audio system after app resumes from background
+  /// Called when app comes to foreground to ensure audio is ready
+  /// CRITICAL: This fixes the "first broadcast missed after wake up" issue
+  Future<void> reWarmAudioForForeground() async {
+    debugPrint('SimpleStream: Re-warming audio for foreground (was pre-warmed: $_isAudioPreWarmed)');
+    // Reset the flag since Android may have reset audio mode while app was in background
+    _isAudioPreWarmed = false;
+    await _preWarmAudioSystem();
   }
 
   /// Set muted state for incoming audio
@@ -166,6 +234,12 @@ class SimpleLiveStreamingService {
 
     _floorSubscription = _wsService.floorState.listen((event) {
       if (event.roomId == channelId) {
+        // CRITICAL: Only process if this is the active channel
+        // This prevents cross-channel audio when multiple services exist
+        if (!isActiveChannel) {
+          debugPrint('SimpleStream: Ignoring floor event for $channelId - not active channel (active: $_activeChannelId)');
+          return;
+        }
         _handleFloorStateChange(event.state);
       }
     });
@@ -206,9 +280,14 @@ class SimpleLiveStreamingService {
 
     // Listen for offer requests from listeners who didn't receive our offer
     _offerRequestSubscription = _wsService.webrtcOfferRequests.listen((event) async {
+      debugPrint('SimpleStream: Received offer request from ${event.fromUserId} for room ${event.roomId}');
+      debugPrint('SimpleStream: My channel=$channelId, isBroadcasting=$_isBroadcasting, hasLocalStream=${_localStream != null}');
+
       if (event.roomId == channelId && _isBroadcasting && _localStream != null) {
-        debugPrint('SimpleStream: Listener ${event.fromUserId} requested offer - resending');
+        debugPrint('SimpleStream: RESENDING offer to ${event.fromUserId}');
         await _createAndSendOffer(event.fromUserId);
+      } else {
+        debugPrint('SimpleStream: Ignoring offer request - conditions not met');
       }
     });
   }
@@ -374,11 +453,19 @@ class SimpleLiveStreamingService {
 
     if (floor == null) {
       // Floor released - stop audio IMMEDIATELY then cleanup async
+      // Log if floor released before we received audio (ultra-short broadcast)
+      if (_state == SimpleLiveStreamingState.listening && !_hasReceivedAudioTrack) {
+        debugPrint('SimpleStream: WARNING - Floor released before audio track arrived (ultra-short broadcast)');
+      }
+
       _currentSpeakerId = null;
       _speakerController.add((id: null, name: null));
       _cancelListeningTimeout();
+      _stopAudioFlowVerification(); // Cancel all verification and recovery timers
       _hasReceivedAudioTrack = false;
+      _hasReceivedOffer = false;
       _offerRetryCount = 0;
+      _recoveryAttemptCount = 0;
 
       if (_isBroadcasting) {
         _setLocalAudioEnabled(false);
@@ -418,18 +505,53 @@ class SimpleLiveStreamingService {
       }
       _isBroadcasting = false;
       _hasReceivedAudioTrack = false;
+      _hasReceivedOffer = false;
       _offerRetryCount = 0;
+      _silentAudioRecoveryCount = 0; // Reset silent audio recovery counter
       _updateState(SimpleLiveStreamingState.listening);
 
-      // Start timeout to detect if we don't receive audio
-      _startListeningTimeout(floor.speakerId);
+      // CRITICAL: Configure audio mode SYNCHRONOUSLY before proceeding
+      // This was causing "first broadcast missed" because audio wasn't ready
+      // when the WebRTC offer arrived
+      _ensureAudioReadyForListening(floor.speakerId);
     }
+  }
+
+  /// Ensure audio is configured and ready for listening
+  /// This is called synchronously when someone starts speaking
+  Future<void> _ensureAudioReadyForListening(String speakerId) async {
+    try {
+      debugPrint('SimpleStream: Ensuring audio ready for listening to $speakerId');
+
+      // Configure audio mode - MUST complete before we can receive audio
+      await NativeAudioService.setAudioModeForVoiceChat();
+      await NativeAudioService.setSpeakerOn(true);
+      _isAudioPreWarmed = true;
+
+      debugPrint('SimpleStream: Audio ready for listening');
+    } catch (e) {
+      debugPrint('SimpleStream: Audio config error for listening: $e');
+    }
+
+    // Start timeout to detect if we don't receive audio
+    // Only start AFTER audio is configured
+    _startListeningTimeout(speakerId);
   }
 
   /// Start a timeout to detect if we don't receive audio while "listening"
   void _startListeningTimeout(String speakerId) {
     _cancelListeningTimeout();
 
+    // NEW: Start an early check timer - if no offer after 2 seconds, request one
+    // This catches cases where speaker never sent an offer
+    _earlyOfferCheckTimer = Timer(_earlyOfferCheckDelay, () {
+      if (_state == SimpleLiveStreamingState.listening && !_hasReceivedOffer) {
+        debugPrint('SimpleStream: EARLY CHECK - No offer received after $_earlyOfferCheckDelay, requesting offer from $speakerId');
+        _requestOfferFromSpeaker(speakerId);
+      }
+    });
+
+    // Main timeout timer for backup
     _listeningTimeoutTimer = Timer(_listeningTimeout, () {
       if (_state == SimpleLiveStreamingState.listening && !_hasReceivedAudioTrack) {
         debugPrint('SimpleStream: TIMEOUT - No audio received after $_listeningTimeout, requesting offer from $speakerId');
@@ -442,17 +564,30 @@ class SimpleLiveStreamingService {
   void _cancelListeningTimeout() {
     _listeningTimeoutTimer?.cancel();
     _listeningTimeoutTimer = null;
+    _earlyOfferCheckTimer?.cancel();
+    _earlyOfferCheckTimer = null;
   }
 
   /// Request offer from speaker when we haven't received one
   void _requestOfferFromSpeaker(String speakerId) {
     if (_offerRetryCount >= _maxOfferRetries) {
-      debugPrint('SimpleStream: Max offer retries reached ($_maxOfferRetries), giving up');
+      debugPrint('SimpleStream: Max offer retries reached ($_maxOfferRetries)');
+
+      // Last resort: close all connections and request offer one final time
+      // This handles edge cases where stale connections block new ones
+      _performFinalRecoveryAttempt(speakerId);
       return;
     }
 
     _offerRetryCount++;
     debugPrint('SimpleStream: Requesting offer from speaker (attempt $_offerRetryCount/$_maxOfferRetries)');
+
+    // Re-configure audio before requesting offer
+    NativeAudioService.setAudioModeForVoiceChat().then((_) {
+      NativeAudioService.setSpeakerOn(true);
+    }).catchError((e) {
+      debugPrint('SimpleStream: Audio config error before offer request: $e');
+    });
 
     // Send a request_offer message to ask the speaker to send us an offer
     _wsService.requestWebRtcOffer(channelId, speakerId);
@@ -462,6 +597,45 @@ class SimpleLiveStreamingService {
       if (_state == SimpleLiveStreamingState.listening && !_hasReceivedAudioTrack) {
         debugPrint('SimpleStream: Still no audio after retry $_offerRetryCount');
         _requestOfferFromSpeaker(speakerId);
+      }
+    });
+  }
+
+  /// Perform final recovery attempt by clearing all connections and starting fresh
+  Future<void> _performFinalRecoveryAttempt(String speakerId) async {
+    debugPrint('SimpleStream: Performing FINAL recovery attempt - clearing all connections');
+
+    // Close all existing peer connections to ensure clean slate
+    await _closeAllPeerConnections();
+
+    // Reset tracking state
+    _hasReceivedAudioTrack = false;
+    _remoteStream = null;
+    _currentSpeakerPeerId = null;
+
+    // Wait a short moment for cleanup to complete
+    await Future.delayed(const Duration(milliseconds: 300));
+
+    // Reconfigure audio from scratch
+    try {
+      await NativeAudioService.resetAudioMode();
+      await NativeAudioService.setAudioModeForVoiceChat();
+      await NativeAudioService.setSpeakerOn(true);
+    } catch (e) {
+      debugPrint('SimpleStream: Final recovery audio config error: $e');
+    }
+
+    // Request fresh offer
+    debugPrint('SimpleStream: Final recovery - requesting fresh offer from $speakerId');
+    _wsService.requestWebRtcOffer(channelId, speakerId);
+
+    // Set one more timeout - if this fails, we've done all we can
+    _listeningTimeoutTimer = Timer(const Duration(seconds: 8), () {
+      if (_state == SimpleLiveStreamingState.listening && !_hasReceivedAudioTrack) {
+        debugPrint('SimpleStream: FINAL RECOVERY FAILED - still no audio');
+        // At this point, the speaker might have stopped or there's a network issue
+        // The audio flow controller will signal this to UI if needed
+        _audioFlowController.add(false);
       }
     });
   }
@@ -558,13 +732,32 @@ class SimpleLiveStreamingService {
 
     debugPrint('SimpleStream: Received offer from $fromUserId');
 
+    // Mark that we received an offer - cancel early check timer
+    _hasReceivedOffer = true;
+    _earlyOfferCheckTimer?.cancel();
+
     try {
       // Configure audio for receiving
       await NativeAudioService.setAudioModeForVoiceChat();
       await NativeAudioService.setSpeakerOn(true);
 
+      // CRITICAL: Preserve pending ICE candidates before closing old connection
+      // ICE candidates may arrive before offer processing completes
+      final savedIceCandidates = List<RTCIceCandidate>.from(
+        _pendingIceCandidates[fromUserId] ?? [],
+      );
+      if (savedIceCandidates.isNotEmpty) {
+        debugPrint('SimpleStream: Preserving ${savedIceCandidates.length} ICE candidates for $fromUserId');
+      }
+
       // Close existing connection to this speaker if any
       await _closePeerConnectionFor(fromUserId);
+
+      // Restore saved ICE candidates after closing old connection
+      if (savedIceCandidates.isNotEmpty) {
+        _pendingIceCandidates[fromUserId] = savedIceCandidates;
+        debugPrint('SimpleStream: Restored ${savedIceCandidates.length} ICE candidates for $fromUserId');
+      }
 
       // Create peer connection for receiving
       final pc = await _createPeerConnection(fromUserId);
@@ -640,6 +833,10 @@ class SimpleLiveStreamingService {
     String sdpMid,
     int sdpMLineIndex,
   ) async {
+    // Log received ICE candidate (truncate for readability)
+    final candidatePreview = candidate.length > 60 ? '${candidate.substring(0, 60)}...' : candidate;
+    debugPrint('SimpleStream: ICE candidate received from $fromUserId: $candidatePreview');
+
     final iceCandidate = RTCIceCandidate(candidate, sdpMid, sdpMLineIndex);
 
     final pc = _peerConnections[fromUserId];
@@ -648,6 +845,7 @@ class SimpleLiveStreamingService {
       _pendingIceCandidates.putIfAbsent(fromUserId, () => []);
       if (_pendingIceCandidates[fromUserId]!.length < _maxPendingIceCandidates) {
         _pendingIceCandidates[fromUserId]!.add(iceCandidate);
+        debugPrint('SimpleStream: Queued ICE candidate for $fromUserId (pending: ${_pendingIceCandidates[fromUserId]!.length})');
       } else {
         debugPrint('SimpleStream: ICE queue full for $fromUserId, dropping candidate');
       }
@@ -659,12 +857,14 @@ class SimpleLiveStreamingService {
       _pendingIceCandidates.putIfAbsent(fromUserId, () => []);
       if (_pendingIceCandidates[fromUserId]!.length < _maxPendingIceCandidates) {
         _pendingIceCandidates[fromUserId]!.add(iceCandidate);
+        debugPrint('SimpleStream: Queued ICE (no remote desc) for $fromUserId');
       }
       return;
     }
 
     try {
       await pc.addCandidate(iceCandidate);
+      debugPrint('SimpleStream: Added ICE candidate from $fromUserId');
     } catch (e) {
       debugPrint('SimpleStream: Failed to add ICE candidate from $fromUserId: $e');
     }
@@ -674,8 +874,12 @@ class SimpleLiveStreamingService {
   Future<void> _applyPendingIceCandidatesFor(String peerId) async {
     final pc = _peerConnections[peerId];
     final candidates = _pendingIceCandidates[peerId];
-    if (pc == null || candidates == null || candidates.isEmpty) return;
+    if (pc == null || candidates == null || candidates.isEmpty) {
+      debugPrint('SimpleStream: No pending ICE candidates to apply for $peerId');
+      return;
+    }
 
+    debugPrint('SimpleStream: Applying ${candidates.length} pending ICE candidates for $peerId');
     for (final candidate in candidates) {
       try {
         await pc.addCandidate(candidate);
@@ -688,10 +892,12 @@ class SimpleLiveStreamingService {
 
   /// Create WebRTC peer connection
   Future<RTCPeerConnection> _createPeerConnection(String peerId) async {
+    // CHANGED: Use 'all' instead of 'relay' to allow direct connections as fallback
+    // when TURN server fails. This improves connection reliability.
     final configuration = {
       'iceServers': AppConstants.iceServers,
       'sdpSemantics': 'unified-plan',
-      'iceTransportPolicy': 'relay',
+      'iceTransportPolicy': 'all', // Was 'relay' - changed to allow STUN/direct fallback
       'bundlePolicy': 'max-bundle',
       'rtcpMuxPolicy': 'require',
     };
@@ -718,7 +924,10 @@ class SimpleLiveStreamingService {
           state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
         _connectedListeners.remove(peerId);
         _listenerCountController.add(_connectedListeners.length);
-        _closePeerConnectionFor(peerId);
+        // FIXED: Only close if still in the map (avoid concurrent modification during bulk cleanup)
+        if (_peerConnections.containsKey(peerId)) {
+          _closePeerConnectionFor(peerId);
+        }
       }
     };
 
@@ -726,26 +935,54 @@ class SimpleLiveStreamingService {
     pc.onTrack = (RTCTrackEvent event) {
       debugPrint('SimpleStream: onTrack - ${event.track.kind}');
 
+      // CRITICAL: Ignore tracks if we're no longer in listening state
+      // This handles the race condition where floor is released before track arrives
+      if (_state != SimpleLiveStreamingState.listening) {
+        debugPrint('SimpleStream: Ignoring track - not in listening state (state: $_state)');
+        return;
+      }
+
       if (event.track.kind == 'audio' && event.streams.isNotEmpty) {
         final stream = event.streams.first;
         _remoteStream = stream;
 
-        // Mark that we've received audio - cancel the timeout
+        // Check if this is a recovery track
+        final wasRecovery = !_hasReceivedAudioTrack && _recoveryAttemptCount > 0;
+        if (wasRecovery) {
+          debugPrint('SimpleStream: Audio track received during RECOVERY! (attempt $_recoveryAttemptCount)');
+        }
+
+        // Mark that we've received audio - cancel timeouts
         _hasReceivedAudioTrack = true;
         _cancelListeningTimeout();
-        debugPrint('SimpleStream: Audio track received! Cancelling timeout.');
+        _recoveryTimeoutTimer?.cancel();
+        _recoveryAttemptCount = 0;
+        debugPrint('SimpleStream: Audio track received! Cancelling timeouts.');
+
+        // Re-ensure audio mode is properly configured when receiving track
+        NativeAudioService.setAudioModeForVoiceChat().then((_) {
+          NativeAudioService.setSpeakerOn(true);
+        }).catchError((e) {
+          debugPrint('SimpleStream: Audio mode config error: $e');
+        });
 
         // Enable audio track
         event.track.enabled = !_isMuted;
         for (final track in stream.getAudioTracks()) {
           track.enabled = !_isMuted;
+          debugPrint('SimpleStream: Enabled audio track, muted: $_isMuted');
         }
 
         _remoteStreamController.add(stream);
         debugPrint('SimpleStream: Remote audio stream ready');
 
         // Start audio flow verification for this peer
+        // This will detect silent audio and trigger recovery if needed
         _startAudioFlowVerification(pc, peerId);
+
+        // Start a secondary verification to ensure audio starts flowing
+        // within 3 seconds of track reception
+        _startPostTrackAudioVerification(peerId);
       }
     };
 
@@ -771,12 +1008,21 @@ class SimpleLiveStreamingService {
 
   /// Start monitoring audio flow using RTP stats
   /// Detects "silent audio" where connection exists but no audio flows
+  /// Triggers automatic recovery by requesting new offer from speaker
   void _startAudioFlowVerification(RTCPeerConnection pc, String peerId) {
     _stopAudioFlowVerification();
     _lastBytesReceived = 0;
     _silentCheckCount = 0;
+    _silentAudioRecoveryCount = 0;
+    _recoveryAttemptCount = 0; // Reset recovery attempts for new connection
 
     _audioFlowTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
+      // Don't verify if we're not in listening state anymore
+      if (_state != SimpleLiveStreamingState.listening) {
+        timer.cancel();
+        return;
+      }
+
       try {
         final stats = await pc.getStats();
         int totalBytesReceived = 0;
@@ -788,16 +1034,50 @@ class SimpleLiveStreamingService {
         }
 
         if (totalBytesReceived > _lastBytesReceived) {
-          // Audio is flowing
+          // Audio is flowing - reset all counters and cancel recovery timer
           _silentCheckCount = 0;
+          _silentAudioRecoveryCount = 0;
+          _recoveryAttemptCount = 0;
+          _recoveryTimeoutTimer?.cancel();
           _audioFlowController.add(true);
-          debugPrint('SimpleStream: Audio flowing from $peerId (${totalBytesReceived - _lastBytesReceived} bytes)');
+          // Only log occasionally to reduce noise
+          if (totalBytesReceived - _lastBytesReceived > 1000) {
+            debugPrint('SimpleStream: Audio flowing from $peerId');
+          }
         } else {
           // No new audio bytes
           _silentCheckCount++;
           if (_silentCheckCount >= _maxSilentChecks) {
             debugPrint('SimpleStream: WARNING - No audio flow from $peerId for $_silentCheckCount seconds');
             _audioFlowController.add(false);
+
+            // Trigger recovery - request new offer from speaker
+            if (_silentAudioRecoveryCount < _maxSilentAudioRecoveries && _currentSpeakerId != null) {
+              _silentAudioRecoveryCount++;
+              final speakerId = _currentSpeakerId!;
+              debugPrint('SimpleStream: Silent audio detected - initiating recovery attempt $_silentAudioRecoveryCount/$_maxSilentAudioRecoveries');
+
+              // Close the silent connection and request a fresh offer
+              await _closePeerConnectionFor(peerId);
+              _hasReceivedAudioTrack = false;
+
+              // Re-configure audio mode to ensure it's properly set
+              await NativeAudioService.setAudioModeForVoiceChat();
+              await NativeAudioService.setSpeakerOn(true);
+
+              // Request new offer from speaker
+              _wsService.requestWebRtcOffer(channelId, speakerId);
+
+              // CRITICAL: Start recovery timeout to detect if offer doesn't arrive
+              _startRecoveryTimeout(speakerId);
+
+              // Reset silent check count for the new connection attempt
+              _silentCheckCount = 0;
+            } else if (_silentAudioRecoveryCount >= _maxSilentAudioRecoveries) {
+              debugPrint('SimpleStream: Max silent audio recoveries reached ($_maxSilentAudioRecoveries)');
+              // Stop verification to avoid continuous warnings
+              timer.cancel();
+            }
           }
         }
 
@@ -812,7 +1092,102 @@ class SimpleLiveStreamingService {
   void _stopAudioFlowVerification() {
     _audioFlowTimer?.cancel();
     _audioFlowTimer = null;
+    _postTrackVerificationTimer?.cancel();
+    _postTrackVerificationTimer = null;
+    _recoveryTimeoutTimer?.cancel();
+    _recoveryTimeoutTimer = null;
     _silentCheckCount = 0;
+    _recoveryAttemptCount = 0;
+  }
+
+  Timer? _postTrackVerificationTimer;
+
+  /// Verify audio starts flowing within 3 seconds of track reception
+  /// This catches cases where track arrives but audio never flows
+  void _startPostTrackAudioVerification(String peerId) {
+    _postTrackVerificationTimer?.cancel();
+
+    _postTrackVerificationTimer = Timer(const Duration(seconds: 3), () async {
+      // Only check if we're still in listening state
+      if (_state != SimpleLiveStreamingState.listening) return;
+
+      final pc = _peerConnections[peerId];
+      if (pc == null) return;
+
+      try {
+        final stats = await pc.getStats();
+        int bytesReceived = 0;
+
+        for (final report in stats) {
+          if (report.type == 'inbound-rtp' && report.values['kind'] == 'audio') {
+            bytesReceived += (report.values['bytesReceived'] as int?) ?? 0;
+          }
+        }
+
+        if (bytesReceived == 0 && _currentSpeakerId != null) {
+          debugPrint('SimpleStream: Post-track verification FAILED - no audio bytes received after 3s');
+          debugPrint('SimpleStream: Requesting fresh offer from speaker');
+
+          final speakerId = _currentSpeakerId!;
+
+          // Audio track arrived but no RTP packets - request new offer
+          await _closePeerConnectionFor(peerId);
+          _hasReceivedAudioTrack = false;
+
+          // Reconfigure audio
+          await NativeAudioService.setAudioModeForVoiceChat();
+          await NativeAudioService.setSpeakerOn(true);
+
+          _wsService.requestWebRtcOffer(channelId, speakerId);
+
+          // CRITICAL: Set a timeout to detect if recovery fails
+          // This ensures we don't get stuck if the new offer never arrives
+          _startRecoveryTimeout(speakerId);
+        } else {
+          debugPrint('SimpleStream: Post-track verification OK - $bytesReceived bytes received');
+        }
+      } catch (e) {
+        debugPrint('SimpleStream: Post-track verification error: $e');
+      }
+    });
+  }
+
+  /// Track recovery attempts to prevent infinite loops
+  int _recoveryAttemptCount = 0;
+  static const int _maxRecoveryAttempts = 3;
+  Timer? _recoveryTimeoutTimer;
+
+  /// Start a timeout to detect if recovery offer request fails
+  void _startRecoveryTimeout(String speakerId) {
+    _recoveryTimeoutTimer?.cancel();
+
+    _recoveryTimeoutTimer = Timer(const Duration(seconds: 5), () async {
+      // If we still haven't received audio after recovery attempt
+      if (_state == SimpleLiveStreamingState.listening && !_hasReceivedAudioTrack) {
+        _recoveryAttemptCount++;
+        debugPrint('SimpleStream: Recovery timeout - attempt $_recoveryAttemptCount/$_maxRecoveryAttempts');
+
+        if (_recoveryAttemptCount < _maxRecoveryAttempts) {
+          // Try again - reconfigure audio and request new offer
+          debugPrint('SimpleStream: Retrying recovery for $speakerId');
+
+          await NativeAudioService.setAudioModeForVoiceChat();
+          await NativeAudioService.setSpeakerOn(true);
+
+          _wsService.requestWebRtcOffer(channelId, speakerId);
+
+          // Set another timeout
+          _startRecoveryTimeout(speakerId);
+        } else {
+          debugPrint('SimpleStream: Max recovery attempts reached - giving up');
+          _recoveryAttemptCount = 0;
+          _audioFlowController.add(false);
+        }
+      } else {
+        // Recovery succeeded or state changed
+        _recoveryAttemptCount = 0;
+      }
+    });
   }
 
   /// Close peer connection for a specific peer
@@ -840,22 +1215,31 @@ class SimpleLiveStreamingService {
   }
 
   /// Close all peer connections
+  /// FIXED: Create a copy of entries to avoid concurrent modification
   Future<void> _closeAllPeerConnections() async {
     _stopAudioFlowVerification();
     _pendingIceCandidates.clear();
     _connectedListeners.clear();
 
-    for (final entry in _peerConnections.entries) {
+    // CRITICAL: Create a copy of the map to avoid concurrent modification
+    // The pc.close() can trigger onConnectionState callbacks that modify the map
+    final connectionsToClose = Map<String, RTCPeerConnection>.from(_peerConnections);
+    _peerConnections.clear(); // Clear immediately to prevent callback modifications
+
+    for (final entry in connectionsToClose.entries) {
       try {
         await entry.value.close();
       } catch (e) {
         debugPrint('SimpleStream: Error closing connection to ${entry.key}: $e');
       }
     }
-    _peerConnections.clear();
 
     if (_remoteStream != null) {
-      await _remoteStream!.dispose();
+      try {
+        await _remoteStream!.dispose();
+      } catch (e) {
+        debugPrint('SimpleStream: Error disposing remote stream: $e');
+      }
       _remoteStream = null;
     }
 
@@ -899,10 +1283,15 @@ class SimpleLiveStreamingService {
 
   /// Dispose resources
   Future<void> dispose() async {
-    Logger.d('Disposing SimpleLiveStreamingService');
+    Logger.d('Disposing SimpleLiveStreamingService for $channelId');
+
+    // Clear active channel if this was the active one
+    _clearActiveChannelIfSelf();
 
     _floorRequestTimeout?.cancel();
     _cancelListeningTimeout();
+    _postTrackVerificationTimer?.cancel();
+    _recoveryTimeoutTimer?.cancel();
 
     await _offerSubscription?.cancel();
     await _answerSubscription?.cancel();

@@ -169,11 +169,21 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
 
   Future<void> _onAppForeground() async {
     debugPrint('SimplePTT: App coming to foreground');
+
+    // CRITICAL: Re-warm audio system FIRST before anything else
+    // This fixes "first broadcast missed after wake up" issue
+    // Android may have reset audio mode while app was in background
     try {
-      await NativeAudioService.setAudioModeForVoiceChat();
-      await NativeAudioService.setSpeakerOn(true);
+      await _streamingService.reWarmAudioForForeground();
     } catch (e) {
-      debugPrint('SimplePTT: Audio config error: $e');
+      debugPrint('SimplePTT: Streaming service audio re-warm error: $e');
+      // Fallback to direct audio config
+      try {
+        await NativeAudioService.setAudioModeForVoiceChat();
+        await NativeAudioService.setSpeakerOn(true);
+      } catch (e2) {
+        debugPrint('SimplePTT: Audio config fallback error: $e2');
+      }
     }
 
     if (!_wsService.isConnected) {
@@ -206,6 +216,12 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
         if (newState == SimplePttState.broadcasting) {
           state = state.copyWith(broadcastStartTime: DateTime.now());
           _startBroadcastTimer();
+        } else if (newState == SimplePttState.listening) {
+          // Wake up the screen when someone starts speaking
+          // This ensures the user can see who is speaking
+          NativeAudioService.wakeScreen().catchError((e) {
+            debugPrint('SimplePTT: Failed to wake screen: $e');
+          });
         } else {
           _stopBroadcastTimer();
         }

@@ -9,6 +9,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'background_audio_service.dart';
+import 'native_audio_service.dart';
 
 /// FCM message types for PTT
 enum FcmPttMessageType {
@@ -140,6 +141,26 @@ class FcmPttService {
     debugPrint('FcmPttService: *** LIVE BROADCAST STARTED ***');
     debugPrint('FcmPttService: Channel: ${message.channelName} (${message.channelId})');
     debugPrint('FcmPttService: Speaker: ${message.speakerName}');
+
+    // Wake up the screen immediately for incoming voice
+    try {
+      await NativeAudioService.wakeScreen();
+      debugPrint('FcmPttService: Screen wake requested');
+    } catch (e) {
+      debugPrint('FcmPttService: Failed to wake screen: $e');
+    }
+
+    // CRITICAL: Pre-warm audio system IMMEDIATELY when broadcast notification arrives
+    // This fixes "first broadcast missed after wake up" issue
+    // Audio must be ready BEFORE WebRTC connection is established
+    try {
+      debugPrint('FcmPttService: Pre-warming audio for incoming broadcast');
+      await NativeAudioService.setAudioModeForVoiceChat();
+      await NativeAudioService.setSpeakerOn(true);
+      debugPrint('FcmPttService: Audio pre-warmed successfully');
+    } catch (e) {
+      debugPrint('FcmPttService: Audio pre-warm error (non-fatal): $e');
+    }
 
     // Emit to listeners
     _liveBroadcastController.add(message);
@@ -423,15 +444,16 @@ Future<void> _showVoiceMessageNotification({
     'voicely_voice_messages',
     'Voice Messages',
     channelDescription: 'Notifications for voice messages',
-    importance: Importance.high,
-    priority: Priority.high,
+    importance: Importance.max,
+    priority: Priority.max,
     showWhen: true,
     autoCancel: true,
     category: AndroidNotificationCategory.message,
     visibility: NotificationVisibility.public,
+    fullScreenIntent: true, // Wake up screen for incoming voice messages
     playSound: false, // Audio will play separately
     enableVibration: true,
-    vibrationPattern: Int64List.fromList([0, 200, 100, 200]),
+    vibrationPattern: Int64List.fromList([0, 300, 150, 300]),
     ongoing: false,
     colorized: true,
     color: const Color(0xFF2196F3), // Blue color for voice messages
