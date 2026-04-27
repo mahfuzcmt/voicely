@@ -182,9 +182,17 @@ class SimpleLiveStreamingService {
   /// CRITICAL: This fixes the "first broadcast missed after wake up" issue
   Future<void> reWarmAudioForForeground() async {
     debugPrint('SimpleStream: Re-warming audio for foreground (was pre-warmed: $_isAudioPreWarmed)');
+
     // Reset the flag since Android may have reset audio mode while app was in background
     _isAudioPreWarmed = false;
-    await _preWarmAudioSystem();
+
+    // If we're currently in listening state, aggressively activate audio
+    if (_state == SimpleLiveStreamingState.listening) {
+      debugPrint('SimpleStream: Currently listening - activating audio aggressively');
+      await _activateAudioForTrack();
+    } else {
+      await _preWarmAudioSystem();
+    }
   }
 
   /// Set muted state for incoming audio
@@ -527,6 +535,18 @@ class SimpleLiveStreamingService {
     try {
       debugPrint('SimpleStream: Ensuring audio ready for listening to $speakerId');
 
+      // CRITICAL: Wake screen FIRST when receiving audio in background
+      // Audio may not play if display is completely off on some devices
+      try {
+        await NativeAudioService.wakeScreen();
+        debugPrint('SimpleStream: Screen woken up for audio');
+      } catch (e) {
+        debugPrint('SimpleStream: Screen wake failed (may already be on): $e');
+      }
+
+      // Small delay to let screen wake take effect
+      await Future.delayed(const Duration(milliseconds: 100));
+
       // Configure audio mode - MUST complete before we can receive audio
       await NativeAudioService.setAudioModeForVoiceChat();
       await NativeAudioService.setSpeakerOn(true);
@@ -535,6 +555,16 @@ class SimpleLiveStreamingService {
       debugPrint('SimpleStream: Audio ready for listening');
     } catch (e) {
       debugPrint('SimpleStream: Audio config error for listening: $e');
+      // Retry audio configuration
+      try {
+        await Future.delayed(const Duration(milliseconds: 200));
+        await NativeAudioService.setAudioModeForVoiceChat();
+        await NativeAudioService.setSpeakerOn(true);
+        _isAudioPreWarmed = true;
+        debugPrint('SimpleStream: Audio retry successful');
+      } catch (e2) {
+        debugPrint('SimpleStream: Audio retry also failed: $e2');
+      }
     }
 
     // Start timeout to detect if we don't receive audio
@@ -586,10 +616,8 @@ class SimpleLiveStreamingService {
     _offerRetryCount++;
     debugPrint('SimpleStream: Requesting offer from speaker (attempt $_offerRetryCount/$_maxOfferRetries)');
 
-    // Re-configure audio before requesting offer
-    NativeAudioService.setAudioModeForVoiceChat().then((_) {
-      NativeAudioService.setSpeakerOn(true);
-    }).catchError((e) {
+    // Re-configure audio before requesting offer - aggressively
+    _activateAudioForTrack().catchError((e) {
       debugPrint('SimpleStream: Audio config error before offer request: $e');
     });
 
@@ -620,9 +648,18 @@ class SimpleLiveStreamingService {
     // Wait a short moment for cleanup to complete
     await Future.delayed(const Duration(milliseconds: 300));
 
+    // Wake screen first - critical for background audio playback
+    try {
+      await NativeAudioService.wakeScreen();
+      await Future.delayed(const Duration(milliseconds: 100));
+    } catch (e) {
+      // Screen might already be on
+    }
+
     // Reconfigure audio from scratch
     try {
       await NativeAudioService.resetAudioMode();
+      await Future.delayed(const Duration(milliseconds: 100));
       await NativeAudioService.setAudioModeForVoiceChat();
       await NativeAudioService.setSpeakerOn(true);
     } catch (e) {
@@ -963,12 +1000,9 @@ class SimpleLiveStreamingService {
         _recoveryAttemptCount = 0;
         debugPrint('SimpleStream: Audio track received! Cancelling timeouts.');
 
-        // Re-ensure audio mode is properly configured when receiving track
-        NativeAudioService.setAudioModeForVoiceChat().then((_) {
-          NativeAudioService.setSpeakerOn(true);
-        }).catchError((e) {
-          debugPrint('SimpleStream: Audio mode config error: $e');
-        });
+        // CRITICAL: Aggressively configure audio when track is received
+        // This is especially important when coming from background with display off
+        _activateAudioForTrack();
 
         // Enable audio track
         event.track.enabled = !_isMuted;
@@ -1008,6 +1042,52 @@ class SimpleLiveStreamingService {
     };
 
     return pc;
+  }
+
+  /// Aggressively activate audio when track is received
+  /// This is critical for audio playback when app was in background with display off
+  Future<void> _activateAudioForTrack() async {
+    debugPrint('SimpleStream: Activating audio for received track');
+
+    try {
+      // Step 1: Wake screen if needed (ensures audio path is active)
+      try {
+        await NativeAudioService.wakeScreen();
+      } catch (e) {
+        // Screen might already be on, ignore
+      }
+
+      // Step 2: Set audio mode for voice communication
+      await NativeAudioService.setAudioModeForVoiceChat();
+
+      // Step 3: Enable speaker output
+      await NativeAudioService.setSpeakerOn(true);
+
+      debugPrint('SimpleStream: Audio activated successfully for track');
+    } catch (e) {
+      debugPrint('SimpleStream: Initial audio activation failed: $e');
+
+      // Retry with delay
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      try {
+        await NativeAudioService.setAudioModeForVoiceChat();
+        await NativeAudioService.setSpeakerOn(true);
+        debugPrint('SimpleStream: Audio activation retry succeeded');
+      } catch (e2) {
+        debugPrint('SimpleStream: Audio activation retry failed: $e2');
+
+        // Final retry
+        await Future.delayed(const Duration(milliseconds: 500));
+        try {
+          await NativeAudioService.setAudioModeForVoiceChat();
+          await NativeAudioService.setSpeakerOn(true);
+          debugPrint('SimpleStream: Audio activation final retry succeeded');
+        } catch (e3) {
+          debugPrint('SimpleStream: All audio activation attempts failed: $e3');
+        }
+      }
+    }
   }
 
   /// Start monitoring audio flow using RTP stats

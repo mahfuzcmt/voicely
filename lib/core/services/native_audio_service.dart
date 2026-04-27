@@ -4,6 +4,20 @@ import 'package:flutter/services.dart';
 /// Native audio service for direct Android AudioManager control
 class NativeAudioService {
   static const MethodChannel _channel = MethodChannel('com.bitsoft.voicely/audio');
+  static const MethodChannel _pttChannel = MethodChannel('com.voicely.app/ptt');
+
+  /// Wake up the screen when receiving incoming voice messages
+  /// This turns on the display even when the device is locked
+  static Future<bool> wakeScreen() async {
+    try {
+      final result = await _pttChannel.invokeMethod('wakeScreen');
+      debugPrint('NativeAudio: wakeScreen = $result');
+      return result == true;
+    } catch (e) {
+      debugPrint('NativeAudio: Error waking screen: $e');
+      return false;
+    }
+  }
 
   /// Set speakerphone on/off using native Android AudioManager
   static Future<bool> setSpeakerOn(bool enabled) async {

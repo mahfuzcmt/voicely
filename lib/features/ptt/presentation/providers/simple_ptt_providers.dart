@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../../../../core/services/background_ptt_service.dart';
 import '../../../../core/services/native_audio_service.dart';
 import '../../../../di/providers.dart';
 import '../../../channels/data/channel_repository.dart';
@@ -120,6 +121,7 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
   final String channelId;
   final WebSocketSignalingService _wsService;
   final SimpleLiveStreamingService _streamingService;
+  final BackgroundPttService _backgroundService = BackgroundPttService();
 
   StreamSubscription? _connectionSubscription;
   StreamSubscription? _streamingStateSubscription;
@@ -130,9 +132,11 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
 
   Timer? _broadcastTimer;
   Timer? _autoStopTimer;
+  Timer? _backgroundPingTimer;
   bool _wakelockEnabled = false;
   bool _observerAdded = false;
   bool _isDisposed = false;
+  bool _backgroundServiceStarted = false;
 
   static const int _maxBroadcastDurationSeconds = 60;
 
@@ -151,6 +155,7 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
               : SimplePttState.disconnected,
         )) {
     _setupListeners();
+    _setupBackgroundService();
     _autoConnect();
     try {
       WidgetsBinding.instance.addObserver(this);
@@ -160,10 +165,109 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
     }
   }
 
+  /// Setup background service for keeping connection alive when display is off
+  Future<void> _setupBackgroundService() async {
+    try {
+      await _backgroundService.initialize();
+
+      // Set callback for background ping - this keeps WebSocket alive
+      _backgroundService.setOnBackgroundPing(() {
+        debugPrint('SimplePTT: Background ping received, sending WebSocket ping');
+        _wsService.sendPing();
+
+        // Update connection status to background service
+        _backgroundService.updateConnectionStatus(_wsService.isConnected);
+      });
+
+      // Set callback for reconnection request from background service
+      _backgroundService.setOnReconnectRequest(() async {
+        debugPrint('SimplePTT: Background reconnect request received');
+        if (!_wsService.isConnected) {
+          await _wsService.forceReconnect();
+          if (_wsService.isConnected) {
+            _wsService.joinRoom(channelId, rejoin: true);
+          }
+        }
+      });
+
+      debugPrint('SimplePTT: Background service callbacks configured');
+    } catch (e) {
+      debugPrint('SimplePTT: Failed to setup background service: $e');
+    }
+  }
+
+  /// Start background service and acquire wake lock for background operation
+  Future<void> _startBackgroundKeepAlive() async {
+    if (_backgroundServiceStarted) return;
+
+    try {
+      // Acquire partial wake lock to keep CPU running when display is off
+      await BackgroundPttService.acquirePartialWakeLock();
+
+      // Start the foreground service
+      await _backgroundService.start();
+      _backgroundServiceStarted = true;
+
+      // Update initial connection status
+      _backgroundService.updateConnectionStatus(_wsService.isConnected);
+
+      debugPrint('SimplePTT: Background keep-alive started');
+    } catch (e) {
+      debugPrint('SimplePTT: Failed to start background keep-alive: $e');
+    }
+  }
+
+  /// Stop background service and release wake lock
+  Future<void> _stopBackgroundKeepAlive() async {
+    if (!_backgroundServiceStarted) return;
+
+    try {
+      await _backgroundService.stop();
+      await BackgroundPttService.releasePartialWakeLock();
+      _backgroundServiceStarted = false;
+
+      debugPrint('SimplePTT: Background keep-alive stopped');
+    } catch (e) {
+      debugPrint('SimplePTT: Failed to stop background keep-alive: $e');
+    }
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState appState) {
-    if (appState == AppLifecycleState.resumed) {
-      _onAppForeground();
+    debugPrint('SimplePTT: App lifecycle state changed: $appState');
+
+    switch (appState) {
+      case AppLifecycleState.resumed:
+        _onAppForeground();
+        break;
+      case AppLifecycleState.paused:
+      case AppLifecycleState.inactive:
+        _onAppBackground();
+        break;
+      case AppLifecycleState.detached:
+      case AppLifecycleState.hidden:
+        // App being closed - ensure background service is running
+        _onAppBackground();
+        break;
+    }
+  }
+
+  /// Called when app goes to background - start background keep-alive
+  Future<void> _onAppBackground() async {
+    debugPrint('SimplePTT: App going to background - starting keep-alive');
+
+    // Start background service to keep WebSocket alive
+    await _startBackgroundKeepAlive();
+
+    // Send an immediate ping to verify connection before going to background
+    _wsService.sendPing();
+
+    // Update notification to show connected status
+    _backgroundService.updateConnectionStatus(_wsService.isConnected);
+    if (_wsService.isConnected) {
+      _backgroundService.notifyIdle();
+    } else {
+      _backgroundService.notifyDisconnected();
     }
   }
 
@@ -186,12 +290,26 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
       }
     }
 
+    // Check connection and reconnect if needed
     if (!_wsService.isConnected) {
+      debugPrint('SimplePTT: WebSocket disconnected, forcing reconnect');
       await _wsService.forceReconnect();
       if (_wsService.isConnected) {
         _wsService.joinRoom(channelId, rejoin: true);
+        _backgroundService.notifyIdle();
+      } else {
+        _backgroundService.notifyDisconnected();
       }
+    } else {
+      // Already connected - update notification
+      _backgroundService.notifyIdle();
+
+      // Send a ping to verify connection is still alive
+      _wsService.sendPing();
     }
+
+    // Update background service with current connection status
+    _backgroundService.updateConnectionStatus(_wsService.isConnected);
   }
 
   void _setupListeners() {
@@ -202,8 +320,17 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
         state: newPttState,
       );
 
-      if (connState == WSConnectionState.authenticated) {
+      // Update background service with connection status
+      final isConnected = connState == WSConnectionState.authenticated;
+      _backgroundService.updateConnectionStatus(isConnected);
+
+      if (isConnected) {
         _wsService.joinRoom(channelId);
+        _backgroundService.notifyIdle();
+      } else if (connState == WSConnectionState.disconnected ||
+          connState == WSConnectionState.error ||
+          connState == WSConnectionState.reconnecting) {
+        _backgroundService.notifyDisconnected();
       }
     });
 
@@ -216,12 +343,20 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
         if (newState == SimplePttState.broadcasting) {
           state = state.copyWith(broadcastStartTime: DateTime.now());
           _startBroadcastTimer();
+          // Update notification to show broadcasting
+          _backgroundService.updateNotification(
+            title: 'Broadcasting',
+            content: 'You are speaking',
+          );
         } else if (newState == SimplePttState.listening) {
           // Wake up the screen when someone starts speaking
           // This ensures the user can see who is speaking
           NativeAudioService.wakeScreen().catchError((e) {
             debugPrint('SimplePTT: Failed to wake screen: $e');
           });
+        } else if (newState == SimplePttState.idle) {
+          _stopBroadcastTimer();
+          _backgroundService.notifyIdle();
         } else {
           _stopBroadcastTimer();
         }
@@ -231,11 +366,21 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
     _speakerSubscription = _streamingService.currentSpeaker.listen((speaker) {
       if (speaker.id == null) {
         state = state.copyWith(clearSpeaker: true);
+        // No speaker - idle notification
+        if (state.state == SimplePttState.idle ||
+            state.state == SimplePttState.listening) {
+          _backgroundService.notifyIdle();
+        }
       } else {
         state = state.copyWith(
           currentSpeakerId: speaker.id,
           currentSpeakerName: speaker.name,
         );
+        // Someone is speaking - update notification
+        // Don't update if we are the one broadcasting
+        if (speaker.id != _wsService.userId && speaker.name != null) {
+          _backgroundService.notifySpeaking(speaker.name!, 'Channel');
+        }
       }
     });
 
@@ -267,8 +412,13 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
   Future<void> _autoConnect() async {
     await _enableWakelock();
 
+    // Start background service for keep-alive (runs even in background)
+    await _startBackgroundKeepAlive();
+
     if (_wsService.isConnected) {
       _wsService.joinRoom(channelId);
+      _backgroundService.updateConnectionStatus(true);
+      _backgroundService.notifyIdle();
       return;
     }
 
@@ -295,13 +445,20 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
             debugPrint('SimplePTT: Failed to get display name: $e');
           }
         }
-        await _wsService.connect(token, displayName: displayName);
+        final success = await _wsService.connect(token, displayName: displayName);
+
+        // Update background service
+        _backgroundService.updateConnectionStatus(success);
+        if (success) {
+          _backgroundService.notifyIdle();
+        }
       }
     } catch (e) {
       state = state.copyWith(
         state: SimplePttState.error,
         errorMessage: 'Connection failed',
       );
+      _backgroundService.notifyDisconnected();
     }
   }
 
@@ -488,8 +645,12 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
     _floorSubscription?.cancel();
     _remoteStreamSubscription?.cancel();
     _listenerCountSubscription?.cancel();
+    _backgroundPingTimer?.cancel();
     _stopBroadcastTimer();
     _disableWakelock();
+
+    // Stop background keep-alive service
+    _stopBackgroundKeepAlive();
 
     // IMMEDIATELY stop all audio (sync) before async cleanup
     // This ensures no audio plays from old channel when switching
