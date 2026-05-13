@@ -5,7 +5,7 @@ import http from 'http';
 import { RoomManager } from './services/RoomManager';
 import { FloorController } from './services/FloorController';
 import { fcmService } from './services/FcmService';
-import { initializeFirebase, handleAuth, isAuthenticated } from './handlers/auth';
+import { initializeFirebase, handleAuth, isAuthenticated, userSockets, setReplacedSocketHandler } from './handlers/auth';
 import { handleJoinRoom, handleLeaveRoom, handleDisconnect } from './handlers/room';
 import { handleRequestFloor, handleReleaseFloor } from './handlers/floor';
 import {
@@ -18,7 +18,7 @@ import { AuthenticatedWebSocket, MessageType, ErrorMessage } from './types';
 
 // Configuration
 const PORT = parseInt(process.env.PORT || '8080', 10);
-const HEARTBEAT_INTERVAL = parseInt(process.env.WS_HEARTBEAT_INTERVAL || '30000', 10); // 30 seconds - more tolerant of network latency
+const HEARTBEAT_INTERVAL = parseInt(process.env.WS_HEARTBEAT_INTERVAL || '15000', 10); // Reduced from 30s for faster dead connection detection
 const CONNECTION_TIMEOUT = parseInt(process.env.WS_CONNECTION_TIMEOUT || '30000', 10); // Reduced from 60s
 const MAX_CONNECTIONS_PER_ROOM = parseInt(process.env.MAX_CONNECTIONS_PER_ROOM || '50', 10);
 const MAX_TOTAL_CONNECTIONS = parseInt(process.env.MAX_TOTAL_CONNECTIONS || '500', 10);
@@ -28,6 +28,12 @@ const MESSAGE_RATE_WINDOW = 1000; // 1 second window
 // Services
 const roomManager = new RoomManager();
 const floorController = new FloorController(roomManager);
+
+// When a user authenticates a second time, fully clean up the prior socket
+// (rooms, floor) before it is force-closed by the auth handler.
+setReplacedSocketHandler((priorWs) => {
+  handleDisconnect(roomManager, floorController, priorWs);
+});
 
 // Express app
 const app: Express = express();
@@ -97,14 +103,14 @@ const pingInterval = setInterval(() => {
       // Increment missed heartbeat counter
       missedHeartbeats.set(ws, missed + 1);
 
-      // Allow 3 missed heartbeats before terminating (handles network glitches - 2 minutes total)
-      if (missed >= 3) {
+      // Allow 2 missed heartbeats before terminating (handles brief network glitches)
+      if (missed >= 2) {
         console.log(`Terminating dead connection: ${authWs.userId} (missed ${missed + 1} heartbeats)`);
         handleDisconnect(roomManager, floorController, authWs);
         missedHeartbeats.delete(ws);
         return ws.terminate();
       } else {
-        console.log(`Warning: ${authWs.userId} missed heartbeat (${missed + 1}/4)`);
+        console.log(`Warning: ${authWs.userId} missed heartbeat (${missed + 1}/3)`);
       }
     } else {
       // Reset counter on successful pong
@@ -306,6 +312,9 @@ wss.on('connection', (ws: WebSocket) => {
   ws.on('close', (code, reason) => {
     clearTimeout(authTimeout);
     console.log(`Connection closed: ${authWs.userId} (code: ${code}, reason: ${reason})`);
+    if (authWs.userId && userSockets.get(authWs.userId) === authWs) {
+      userSockets.delete(authWs.userId);
+    }
     if (!disconnected) {
       disconnected = true;
       handleDisconnect(roomManager, floorController, authWs);
@@ -315,6 +324,9 @@ wss.on('connection', (ws: WebSocket) => {
   // Handle errors
   ws.on('error', (error) => {
     console.error(`WebSocket error for ${authWs.userId}:`, error);
+    if (authWs.userId && userSockets.get(authWs.userId) === authWs) {
+      userSockets.delete(authWs.userId);
+    }
     if (!disconnected) {
       disconnected = true;
       handleDisconnect(roomManager, floorController, authWs);

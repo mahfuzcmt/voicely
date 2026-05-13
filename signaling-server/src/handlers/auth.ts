@@ -6,6 +6,53 @@ let firebaseInitialized = false;
 const isDevelopment = process.env.NODE_ENV !== 'production';
 const skipAuth = process.env.SKIP_AUTH === 'true';
 
+/**
+ * Tracks the active WebSocket for each authenticated user. We enforce a
+ * single live socket per user — when a new connection authenticates, any
+ * prior socket for the same userId is force-closed (code 4004). Cleared
+ * by server.ts on socket close.
+ */
+export const userSockets: Map<string, AuthenticatedWebSocket> = new Map();
+
+/**
+ * Optional hook the server installs so the auth handler can fully clean up
+ * a replaced socket (remove it from rooms, release the floor, etc.) before
+ * closing it.
+ */
+type DisconnectHandler = (ws: AuthenticatedWebSocket) => void;
+let onReplacedSocket: DisconnectHandler | null = null;
+export function setReplacedSocketHandler(handler: DisconnectHandler): void {
+  onReplacedSocket = handler;
+}
+
+/**
+ * Ensure a users/{uid} doc exists so future FCM-token writes from the
+ * client have somewhere to land. We never write the FCM token here (only
+ * the device knows it); we just make sure the document is present.
+ */
+async function ensureUserDoc(userId: string, displayName: string): Promise<void> {
+  if (!admin.apps.length) return;
+  try {
+    const ref = admin.firestore().collection('users').doc(userId);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      await ref.set({
+        displayName,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastSeen: admin.firestore.FieldValue.serverTimestamp(),
+        autoCreatedBy: 'signaling-server',
+      });
+      console.log(`Auto-created users/${userId} doc (displayName="${displayName}")`);
+    } else {
+      await ref.update({
+        lastSeen: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    console.error(`Failed to ensure users/${userId} doc:`, error);
+  }
+}
+
 export function initializeFirebase(): void {
   if (firebaseInitialized) return;
 
@@ -130,6 +177,25 @@ export async function handleAuth(
     ws.photoUrl = result.photoUrl;
     ws.rooms = new Set();
 
+    // Enforce single live socket per user. If a prior socket exists for this
+    // userId, fully clean it up (rooms, floor) and close it. This eliminates
+    // the "zombie second connection still in room" pattern.
+    const existing = userSockets.get(result.userId!);
+    if (existing && existing !== ws) {
+      console.log(`Replacing prior socket for ${result.userId}`);
+      try {
+        if (onReplacedSocket) onReplacedSocket(existing);
+      } catch (e) {
+        console.error('Replaced-socket cleanup error:', e);
+      }
+      try {
+        existing.close(4004, 'Replaced by new connection');
+      } catch {
+        // socket may already be closing
+      }
+    }
+    userSockets.set(result.userId!, ws);
+
     const successMessage: AuthSuccessMessage = {
       type: MessageType.AUTH_SUCCESS,
       userId: result.userId!,
@@ -138,6 +204,10 @@ export async function handleAuth(
     };
     ws.send(JSON.stringify(successMessage));
     console.log(`User authenticated: ${result.userId}, displayName="${ws.displayName}"`);
+
+    // Fire-and-forget: ensure Firestore has a user doc for future writes.
+    ensureUserDoc(result.userId!, ws.displayName!).catch(() => {});
+
     return true;
   } else {
     const failedMessage: AuthFailedMessage = {
