@@ -225,12 +225,100 @@ sudo systemctl status certbot.timer
 
 ---
 
+## coTURN (TURN/STUN) Server Setup
+
+The Flutter client connects with `iceTransportPolicy: 'relay'` (TURN-only — there is **no** peer-to-peer fallback). This means **all** PTT audio is relayed through this TURN server. If a relay allocation is denied, that user has no media path and their voice silently goes missing. Configure coTURN carefully.
+
+### 1. Install coTURN
+```bash
+sudo apt install -y coturn
+# Enable the service
+sudo sed -i 's/#TURNSERVER_ENABLED=1/TURNSERVER_ENABLED=1/' /etc/default/coturn
+```
+
+### 2. Configure `/etc/turnserver.conf`
+```bash
+sudo nano /etc/turnserver.conf
+```
+
+Use the following (replace `<SERVER_PUBLIC_IP>` and `voicelyent.xyz` with your values):
+```ini
+listening-port=3478
+tls-listening-port=5349
+external-ip=<SERVER_PUBLIC_IP>
+listening-ip=0.0.0.0
+relay-ip=<SERVER_PUBLIC_IP>
+realm=turn.voicelyent.xyz
+server-name=turn.voicelyent.xyz
+userdb=/var/lib/turn/turndb
+lt-cred-mech
+relay-threads=4
+no-udp-relay=false
+no-tcp-relay=false
+log-file=/var/log/turnserver.log
+verbose
+fingerprint
+no-multicast-peers
+no-cli
+no-tlsv1
+no-tlsv1_1
+min-port=49152
+max-port=65535
+
+# REQUIRED: allocation quota.
+# 0 = UNLIMITED. Do NOT set a low cap (e.g. 100). Because the app is
+# TURN-relay-only, hitting the quota returns "486 Allocation Quota Reached"
+# and those users lose audio entirely ("some voices missing"). The real
+# ceiling is the relay port range (min-port..max-port ≈ 16k ports), which
+# is far larger than any low quota. Leave this at 0 on every new server.
+total-quota=0
+
+stale-nonce=600
+proc-user=turnserver
+proc-group=turnserver
+cert=/etc/letsencrypt/live/voicelyent.xyz/fullchain.pem
+pkey=/etc/letsencrypt/live/voicelyent.xyz/privkey.pem
+allow-loopback-peers
+```
+
+### 3. Create the TURN User
+Credentials must match `iceServers` in `lib/core/constants/app_constants.dart`:
+```bash
+sudo turnadmin -a -u voicely -r turn.voicelyent.xyz -p '<TURN_PASSWORD>' -b /var/lib/turn/turndb
+```
+
+### 4. Start and Verify
+```bash
+sudo systemctl enable --now coturn
+sudo systemctl status coturn --no-pager
+
+# Confirm it is listening on 3478 (UDP+TCP) and 5349 (TLS)
+sudo ss -lnup | grep -E '3478|5349'
+
+# Confirm relays are granted (no "486 Allocation Quota Reached")
+sudo journalctl -u coturn --since today | grep '486: Allocation Quota Reached' | wc -l   # expect 0
+```
+
+> If you ever change `total-quota`, run `sudo systemctl restart coturn` and re-check the `486` count above.
+
+---
+
 ## Firewall Configuration
 
 ```bash
 # Allow SSH, HTTP, HTTPS
 sudo ufw allow OpenSSH
 sudo ufw allow 'Nginx Full'
+
+# TURN/STUN signaling + TLS
+sudo ufw allow 3478/tcp
+sudo ufw allow 3478/udp
+sudo ufw allow 5349/tcp
+
+# TURN relay media port range (must match min-port/max-port in turnserver.conf)
+sudo ufw allow 49152:65535/udp
+sudo ufw allow 49152:65535/tcp
+
 sudo ufw enable
 sudo ufw status
 ```
@@ -329,6 +417,7 @@ websocat wss://voicelyent.xyz
 2. **502 Bad Gateway**: Nginx can't reach the backend - check PM2 status
 3. **WebSocket upgrade failed**: Check Nginx proxy settings for WebSocket headers
 4. **Auth failed**: Verify Firebase service account key path and permissions
+5. **"Some voices missing" / users can't be heard intermittently**: The TURN server is denying relay allocations. Check `sudo journalctl -u coturn --since today | grep -c '486: Allocation Quota Reached'` — if non-zero, raise `total-quota` in `/etc/turnserver.conf` (set to `0` for unlimited) and `sudo systemctl restart coturn`. See the coTURN Server Setup section above.
 
 ---
 
