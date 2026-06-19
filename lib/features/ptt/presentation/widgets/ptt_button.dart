@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../core/services/native_audio_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
 import '../providers/ptt_providers.dart';
@@ -43,7 +44,7 @@ class _PttButtonState extends ConsumerState<PttButton>
     super.dispose();
   }
 
-  void _onPressStart() async {
+  void _onPressStart() {
     final session = ref.read(pttSessionProvider(widget.channelId));
 
     if (!session.canRecord) {
@@ -53,49 +54,59 @@ class _PttButtonState extends ConsumerState<PttButton>
       return;
     }
 
+    // Immediate feedback - don't block on async operations
     HapticFeedback.heavyImpact();
     _pulseController.repeat(reverse: true);
 
-    final success = await ref
+    // Wake screen when PTT is pressed (non-blocking)
+    NativeAudioService.wakeScreen();
+
+    // Start recording in background - don't await
+    // State changes will be handled by the provider and UI will update via watch
+    ref
         .read(pttSessionProvider(widget.channelId).notifier)
-        .startRecording();
+        .startRecording()
+        .then((success) {
+      if (!success && mounted) {
+        _pulseController.stop();
+        _pulseController.reset();
 
-    if (!success && mounted) {
-      _pulseController.stop();
-      _pulseController.reset();
-
-      final errorSession = ref.read(pttSessionProvider(widget.channelId));
-      if (errorSession.errorMessage != null) {
-        context.showSnackBar(errorSession.errorMessage!, isError: true);
-        ref.read(pttSessionProvider(widget.channelId).notifier).clearError();
-      }
-    }
-  }
-
-  void _onPressEnd() async {
-    final session = ref.read(pttSessionProvider(widget.channelId));
-
-    if (!session.isRecording) return;
-
-    HapticFeedback.lightImpact();
-    _pulseController.stop();
-    _pulseController.reset();
-
-    final success = await ref
-        .read(pttSessionProvider(widget.channelId).notifier)
-        .stopRecordingAndSend();
-
-    if (mounted) {
-      if (success) {
-        context.showSnackBar('Voice message sent!');
-      } else {
         final errorSession = ref.read(pttSessionProvider(widget.channelId));
         if (errorSession.errorMessage != null) {
           context.showSnackBar(errorSession.errorMessage!, isError: true);
           ref.read(pttSessionProvider(widget.channelId).notifier).clearError();
         }
       }
-    }
+    });
+  }
+
+  void _onPressEnd() {
+    final session = ref.read(pttSessionProvider(widget.channelId));
+
+    if (!session.isRecording) return;
+
+    // Immediate feedback
+    HapticFeedback.lightImpact();
+    _pulseController.stop();
+    _pulseController.reset();
+
+    // Stop recording in background - don't await
+    ref
+        .read(pttSessionProvider(widget.channelId).notifier)
+        .stopRecordingAndSend()
+        .then((success) {
+      if (mounted) {
+        if (success) {
+          context.showSnackBar('Voice message sent!');
+        } else {
+          final errorSession = ref.read(pttSessionProvider(widget.channelId));
+          if (errorSession.errorMessage != null) {
+            context.showSnackBar(errorSession.errorMessage!, isError: true);
+            ref.read(pttSessionProvider(widget.channelId).notifier).clearError();
+          }
+        }
+      }
+    });
   }
 
   @override

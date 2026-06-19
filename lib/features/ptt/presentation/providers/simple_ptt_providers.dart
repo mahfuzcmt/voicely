@@ -343,6 +343,8 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
         if (newState == SimplePttState.broadcasting) {
           state = state.copyWith(broadcastStartTime: DateTime.now());
           _startBroadcastTimer();
+          // Enable wakelock while broadcasting
+          _enableWakelock();
           // Update notification to show broadcasting
           _backgroundService.updateNotification(
             title: 'Broadcasting',
@@ -354,11 +356,17 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
           NativeAudioService.wakeScreen().catchError((e) {
             debugPrint('SimplePTT: Failed to wake screen: $e');
           });
+          // Enable wakelock while listening
+          _enableWakelock();
         } else if (newState == SimplePttState.idle) {
           _stopBroadcastTimer();
           _backgroundService.notifyIdle();
+          // Disable wakelock when idle - allow screen to turn off
+          _disableWakelock();
         } else {
           _stopBroadcastTimer();
+          // Disable wakelock for other states (error, disconnected, etc.)
+          _disableWakelock();
         }
       }
     });
@@ -399,8 +407,10 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
 
     _remoteStreamSubscription =
         _streamingService.remoteStreamAdded.listen((stream) async {
+      // Enable wakelock only while receiving audio (listening)
+      // This will be disabled when speaker stops
       await _enableWakelock();
-      debugPrint('SimplePTT: Remote stream received');
+      debugPrint('SimplePTT: Remote stream received - wakelock enabled for listening');
     });
 
     _listenerCountSubscription =
@@ -410,7 +420,9 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
   }
 
   Future<void> _autoConnect() async {
-    await _enableWakelock();
+    // NOTE: Don't enable WakelockPlus here - it keeps screen on permanently
+    // Screen wakelock is only enabled during active broadcasting/listening
+    // Use partial wake lock for CPU only (keeping WebSocket alive)
 
     // Start background service for keep-alive (runs even in background)
     await _startBackgroundKeepAlive();

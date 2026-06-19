@@ -399,8 +399,9 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     // Make sure background service is running
     await _startBackgroundService();
 
-    // Keep wakelock enabled
-    await _enableWakelock();
+    // NOTE: Don't enable screen wakelock when going to background
+    // Screen should be allowed to turn off. Only CPU wake lock (partial) is needed.
+    // Screen wakelock is managed based on broadcasting/listening state.
 
     // Update notification
     if (state.currentSpeakerName != null) {
@@ -576,8 +577,24 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
         if (newState == LivePttState.broadcasting) {
           state = state.copyWith(broadcastStartTime: DateTime.now());
           _startBroadcastTimer();
+          // Enable wakelock while broadcasting
+          _enableWakelock();
+        } else if (newState == LivePttState.listening) {
+          // Wake screen when someone starts speaking
+          NativeAudioService.wakeScreen().catchError((e) {
+            debugPrint('LivePTT: Failed to wake screen: $e');
+          });
+          // Enable wakelock while listening to audio
+          _enableWakelock();
+          _stopBroadcastTimer();
+        } else if (newState == LivePttState.idle) {
+          _stopBroadcastTimer();
+          // Disable wakelock when idle - allow screen to turn off
+          _disableWakelock();
         } else {
           _stopBroadcastTimer();
+          // Disable wakelock for other states (error, disconnected, etc.)
+          _disableWakelock();
         }
       }
     });
@@ -690,6 +707,7 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     }
 
     // Acquire partial wake lock to keep CPU running in background
+    // NOTE: This is PARTIAL wake lock (CPU only), not screen wake lock
     try {
       await BackgroundPttService.acquirePartialWakeLock();
     } catch (e) {
@@ -701,15 +719,9 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       await _startNativeWebSocketService();
     }
 
-    // Enable wakelock with timeout
-    try {
-      await _enableWakelock().timeout(
-        _initTimeout,
-        onTimeout: () => debugPrint('LivePTT: Wakelock enable timed out'),
-      );
-    } catch (e) {
-      debugPrint('LivePTT: Wakelock error: $e');
-    }
+    // NOTE: Don't enable screen wakelock here - it keeps screen on permanently
+    // Screen wakelock is only enabled during active broadcasting/listening
+    // and disabled when idle. This allows normal screen timeout behavior.
 
     // Request battery optimization exemption with timeout
     try {
@@ -1279,6 +1291,15 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     final activeTracks = audioTracks.where((t) => t.enabled || !(t.muted ?? false)).toList();
     if (activeTracks.isEmpty) {
       debugPrint('LivePTT: WARNING - All audio tracks are disabled/muted');
+    }
+
+    // CRITICAL: Ensure audio routing is correct for playback
+    // This ensures clear audio through the correct output device (speaker or Bluetooth)
+    try {
+      await NativeAudioService.routeAudioToAppropriateDevice();
+      debugPrint('LivePTT: Audio routed to appropriate device for playback');
+    } catch (e) {
+      debugPrint('LivePTT: Audio routing failed: $e');
     }
 
     // Ensure wakelock is enabled during playback

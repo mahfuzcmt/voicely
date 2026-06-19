@@ -5,7 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
+// NOTE: wakelock_plus removed - screen wakelock is managed by PTT providers
+// Background service uses PARTIAL_WAKE_LOCK for CPU only via native channel
 
 /// Background PTT service for receiving voice messages when app is in background
 class BackgroundPttService {
@@ -211,8 +212,9 @@ void _onStart(ServiceInstance service) async {
 
   debugPrint('BackgroundPttService: onStart called');
 
-  // Enable wakelock to prevent CPU from sleeping
-  await WakelockPlus.enable();
+  // NOTE: Don't use WakelockPlus here - it keeps SCREEN on, not just CPU
+  // The PARTIAL_WAKE_LOCK from Android native keeps CPU awake for WebSocket
+  // Screen wakelock is managed by PTT providers based on broadcasting/listening state
 
   // Track connection status and disconnection time
   bool isConnected = false;
@@ -261,7 +263,6 @@ void _onStart(ServiceInstance service) async {
 
   // Handle stop
   service.on('stop').listen((event) async {
-    await WakelockPlus.disable();
     await service.stopSelf();
     debugPrint('BackgroundPttService: Service stopped');
   });
@@ -294,18 +295,9 @@ void _onStart(ServiceInstance service) async {
     }
   });
 
-  // Secondary keepalive - ensure wakelock stays enabled (every 15 seconds)
-  Timer.periodic(const Duration(seconds: 15), (timer) async {
-    try {
-      final isEnabled = await WakelockPlus.enabled;
-      if (!isEnabled) {
-        debugPrint('BackgroundPttService: Re-enabling wakelock');
-        await WakelockPlus.enable();
-      }
-    } catch (e) {
-      debugPrint('BackgroundPttService: Wakelock check failed: $e');
-    }
-  });
+  // NOTE: Removed secondary keepalive for WakelockPlus
+  // Screen wakelock is now managed by PTT providers based on state
+  // This background service only keeps CPU alive via PARTIAL_WAKE_LOCK
 }
 
 /// iOS background handler
@@ -313,9 +305,7 @@ void _onStart(ServiceInstance service) async {
 Future<bool> _onIosBackground(ServiceInstance service) async {
   debugPrint('BackgroundPttService: iOS background');
 
-  // Enable wakelock
-  await WakelockPlus.enable();
-
+  // NOTE: Don't use WakelockPlus here - screen wakelock is managed by PTT providers
   // iOS has limited background execution, but VoIP mode helps
   // The app should stay alive as long as the background modes are set correctly
 
