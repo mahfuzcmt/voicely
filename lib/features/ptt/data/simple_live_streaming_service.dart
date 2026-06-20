@@ -76,6 +76,10 @@ class SimpleLiveStreamingService {
   // Track connected listeners for count
   final Set<String> _connectedListeners = {};
 
+  // Track pending disconnection timeouts - don't remove immediately on "disconnected"
+  // because it's a temporary state that may recover
+  final Map<String, Timer> _disconnectionTimeouts = {};
+
   // Stream subscriptions
   StreamSubscription? _offerSubscription;
   StreamSubscription? _answerSubscription;
@@ -990,12 +994,19 @@ class SimpleLiveStreamingService {
       debugPrint('SimpleStream: Connection state for $peerId: $state');
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
           state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+        // Connection failed/closed - clean up
+        _disconnectionTimeouts[peerId]?.cancel();
+        _disconnectionTimeouts.remove(peerId);
         _connectedListeners.remove(peerId);
         _listenerCountController.add(_connectedListeners.length);
         // FIXED: Only close if still in the map (avoid concurrent modification during bulk cleanup)
         if (_peerConnections.containsKey(peerId)) {
           _closePeerConnectionFor(peerId);
         }
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        // Connection established - cancel any pending disconnection
+        _disconnectionTimeouts[peerId]?.cancel();
+        _disconnectionTimeouts.remove(peerId);
       }
     };
 
@@ -1057,14 +1068,36 @@ class SimpleLiveStreamingService {
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
           state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
         debugPrint('SimpleStream: ICE connected to $peerId - audio should flow');
+        // Cancel any pending disconnection timeout - user recovered!
+        _disconnectionTimeouts[peerId]?.cancel();
+        _disconnectionTimeouts.remove(peerId);
+
         if (_isBroadcasting) {
           _connectedListeners.add(peerId);
           _listenerCountController.add(_connectedListeners.length);
         }
-      } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
-                 state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        // Failed = permanent, remove immediately
+        debugPrint('SimpleStream: ICE FAILED for $peerId - removing listener');
+        _disconnectionTimeouts[peerId]?.cancel();
+        _disconnectionTimeouts.remove(peerId);
         _connectedListeners.remove(peerId);
         _listenerCountController.add(_connectedListeners.length);
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+        // Disconnected = temporary, wait before removing (may recover)
+        // This is common with mobile networks - don't remove immediately!
+        debugPrint('SimpleStream: ICE disconnected for $peerId - waiting 8s before removal');
+
+        // Cancel any existing timeout for this peer
+        _disconnectionTimeouts[peerId]?.cancel();
+
+        // Start a new timeout - only remove if still disconnected after 8 seconds
+        _disconnectionTimeouts[peerId] = Timer(const Duration(seconds: 8), () {
+          debugPrint('SimpleStream: ICE still disconnected after timeout - removing $peerId');
+          _disconnectionTimeouts.remove(peerId);
+          _connectedListeners.remove(peerId);
+          _listenerCountController.add(_connectedListeners.length);
+        });
       }
     };
 
@@ -1317,6 +1350,8 @@ class SimpleLiveStreamingService {
   Future<void> _closePeerConnectionFor(String peerId) async {
     _pendingIceCandidates.remove(peerId);
     _connectedListeners.remove(peerId);
+    _disconnectionTimeouts[peerId]?.cancel();
+    _disconnectionTimeouts.remove(peerId);
     _stopAudioFlowVerification();
 
     final pc = _peerConnections.remove(peerId);
@@ -1343,6 +1378,12 @@ class SimpleLiveStreamingService {
     _stopAudioFlowVerification();
     _pendingIceCandidates.clear();
     _connectedListeners.clear();
+
+    // Cancel all pending disconnection timeouts
+    for (final timer in _disconnectionTimeouts.values) {
+      timer.cancel();
+    }
+    _disconnectionTimeouts.clear();
 
     // CRITICAL: Create a copy of the map to avoid concurrent modification
     // The pc.close() can trigger onConnectionState callbacks that modify the map
@@ -1518,6 +1559,12 @@ class SimpleLiveStreamingService {
     _cancelListeningTimeout();
     _postTrackVerificationTimer?.cancel();
     _recoveryTimeoutTimer?.cancel();
+
+    // Cancel all pending disconnection timeouts
+    for (final timer in _disconnectionTimeouts.values) {
+      timer.cancel();
+    }
+    _disconnectionTimeouts.clear();
 
     await _offerSubscription?.cancel();
     await _answerSubscription?.cancel();
