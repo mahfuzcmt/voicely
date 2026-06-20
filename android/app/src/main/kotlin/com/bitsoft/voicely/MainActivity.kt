@@ -45,6 +45,7 @@ class MainActivity : FlutterActivity() {
         // KeyEvent.KEYCODE_VOLUME_UP,        // 24 - Volume up (DISABLED - conflicts with volume control)
         // KeyEvent.KEYCODE_VOLUME_DOWN,      // 25 - Volume down (not used)
         79,   // KEYCODE_HEADSETHOOK explicit
+        131,  // QMSTAR PTT key (from OS-360 spec)
         141,  // Inrico T310 PTT key (from manufacturer docs)
         142,  // Inrico T310 SOS key
         232,  // Inrico T310 F3 key
@@ -259,6 +260,13 @@ class MainActivity : FlutterActivity() {
                     setAudioModeForPlayback()
                     result.success(true)
                 }
+                "ensureMinimumVoiceVolume" -> {
+                    val minPercent = call.argument<Int>("minPercent") ?: 50
+                    result.success(ensureMinimumVoiceVolume(minPercent))
+                }
+                "boostVoiceCallVolume" -> {
+                    result.success(boostVoiceCallVolume())
+                }
                 else -> {
                     result.notImplemented()
                 }
@@ -326,22 +334,34 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * Register broadcast receiver for Inrico T310 PTT button events.
-     * The T310 sends these broadcasts:
-     * - android.intent.action.PTT.down (press)
-     * - android.intent.action.PTT.up (release)
-     * - android.intent.action.PTT.longpress (long press)
+     * Register broadcast receiver for PTT button events from various Chinese PTT devices.
+     *
+     * Supported devices and their broadcasts:
+     *
+     * 1. Inrico T310:
+     *    - android.intent.action.PTT.down/up/longpress
+     *    - android.intent.action.SOS.down/up/shortpress/longpress
+     *
+     * 2. QMSTAR devices (from OS-360 spec):
+     *    - qmstar.keyflag.ptt.down/up (keyCode 131)
+     *
+     * 3. UNIPRO devices (from OS-360 spec):
+     *    - unipro.hotkey.p2.down/up/long (Custom key 1)
+     *    - unipro.hotkey.p3.down/up/long (Custom key 2)
+     *    - android.intent.action.sos.down/up/long (SOS - lowercase)
+     *    - android.intent.ptt.channelUp/channelDown (Channel switching)
      */
     private fun registerPttBroadcastReceiver() {
         pttBroadcastReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 try {
                     when (intent?.action) {
+                        // === Inrico T310 PTT broadcasts ===
                         "android.intent.action.PTT.down" -> {
                             if (!isPttButtonPressed) {
                                 isPttButtonPressed = true
                                 android.util.Log.d("VoicelyPTT", "PTT broadcast DOWN (Inrico T310)")
-                                wakeScreen() // Wake screen on PTT press
+                                wakeScreen()
                                 sendPttEventSafe("ptt_down", 141, "broadcast")
                             }
                         }
@@ -356,14 +376,93 @@ class MainActivity : FlutterActivity() {
                             android.util.Log.d("VoicelyPTT", "PTT broadcast LONGPRESS (Inrico T310)")
                             sendPttEventSafe("ptt_longpress", 141, "broadcast")
                         }
-                        // SOS button broadcasts
-                        "android.intent.action.SOS.down" -> {
-                            android.util.Log.d("VoicelyPTT", "SOS broadcast DOWN (Inrico T310)")
+
+                        // === QMSTAR PTT broadcasts (OS-360 spec) ===
+                        "qmstar.keyflag.ptt.down" -> {
+                            if (!isPttButtonPressed) {
+                                isPttButtonPressed = true
+                                android.util.Log.d("VoicelyPTT", "PTT broadcast DOWN (QMSTAR)")
+                                wakeScreen()
+                                sendPttEventSafe("ptt_down", 131, "broadcast_qmstar")
+                            }
+                        }
+                        "qmstar.keyflag.ptt.up" -> {
+                            if (isPttButtonPressed) {
+                                isPttButtonPressed = false
+                                android.util.Log.d("VoicelyPTT", "PTT broadcast UP (QMSTAR)")
+                                sendPttEventSafe("ptt_up", 131, "broadcast_qmstar")
+                            }
+                        }
+
+                        // === UNIPRO Custom Key 1 (P2) broadcasts ===
+                        "unipro.hotkey.p2.down" -> {
+                            if (!isPttButtonPressed) {
+                                isPttButtonPressed = true
+                                android.util.Log.d("VoicelyPTT", "Custom key P2 DOWN (UNIPRO)")
+                                wakeScreen()
+                                sendPttEventSafe("ptt_down", 201, "broadcast_unipro_p2")
+                            }
+                        }
+                        "unipro.hotkey.p2.up" -> {
+                            if (isPttButtonPressed) {
+                                isPttButtonPressed = false
+                                android.util.Log.d("VoicelyPTT", "Custom key P2 UP (UNIPRO)")
+                                sendPttEventSafe("ptt_up", 201, "broadcast_unipro_p2")
+                            }
+                        }
+                        "unipro.hotkey.p2.long" -> {
+                            android.util.Log.d("VoicelyPTT", "Custom key P2 LONG (UNIPRO)")
+                            sendPttEventSafe("ptt_longpress", 201, "broadcast_unipro_p2")
+                        }
+
+                        // === UNIPRO Custom Key 2 (P3) broadcasts ===
+                        "unipro.hotkey.p3.down" -> {
+                            if (!isPttButtonPressed) {
+                                isPttButtonPressed = true
+                                android.util.Log.d("VoicelyPTT", "Custom key P3 DOWN (UNIPRO)")
+                                wakeScreen()
+                                sendPttEventSafe("ptt_down", 202, "broadcast_unipro_p3")
+                            }
+                        }
+                        "unipro.hotkey.p3.up" -> {
+                            if (isPttButtonPressed) {
+                                isPttButtonPressed = false
+                                android.util.Log.d("VoicelyPTT", "Custom key P3 UP (UNIPRO)")
+                                sendPttEventSafe("ptt_up", 202, "broadcast_unipro_p3")
+                            }
+                        }
+                        "unipro.hotkey.p3.long" -> {
+                            android.util.Log.d("VoicelyPTT", "Custom key P3 LONG (UNIPRO)")
+                            sendPttEventSafe("ptt_longpress", 202, "broadcast_unipro_p3")
+                        }
+
+                        // === SOS button broadcasts (both Inrico and UNIPRO formats) ===
+                        "android.intent.action.SOS.down", "android.intent.action.sos.down" -> {
+                            android.util.Log.d("VoicelyPTT", "SOS broadcast DOWN")
+                            wakeScreen()
                             sendPttEventSafe("sos_down", 142, "broadcast")
                         }
-                        "android.intent.action.SOS.up" -> {
-                            android.util.Log.d("VoicelyPTT", "SOS broadcast UP (Inrico T310)")
+                        "android.intent.action.SOS.up", "android.intent.action.sos.up" -> {
+                            android.util.Log.d("VoicelyPTT", "SOS broadcast UP")
                             sendPttEventSafe("sos_up", 142, "broadcast")
+                        }
+                        "android.intent.action.SOS.shortpress" -> {
+                            android.util.Log.d("VoicelyPTT", "SOS broadcast SHORTPRESS")
+                            sendPttEventSafe("sos_shortpress", 142, "broadcast")
+                        }
+                        "android.intent.action.SOS.longpress", "android.intent.action.sos.long" -> {
+                            android.util.Log.d("VoicelyPTT", "SOS broadcast LONGPRESS")
+                            sendPttEventSafe("sos_longpress", 142, "broadcast")
+                        }
+
+                        // === Channel switching broadcasts (UNIPRO) ===
+                        "android.intent.ptt.channelUp" -> {
+                            android.util.Log.d("VoicelyPTT", "Channel UP broadcast")
+                            sendPttEventSafe("channel_up", 0, "broadcast_channel")
+                        }
+                        "android.intent.ptt.channelDown" -> {
+                            android.util.Log.d("VoicelyPTT", "Channel DOWN broadcast")
+                            sendPttEventSafe("channel_down", 0, "broadcast_channel")
                         }
                     }
                 } catch (e: Exception) {
@@ -377,11 +476,33 @@ class MainActivity : FlutterActivity() {
             addAction("android.intent.action.PTT.down")
             addAction("android.intent.action.PTT.up")
             addAction("android.intent.action.PTT.longpress")
-            // Inrico T310 SOS button broadcasts
+
+            // QMSTAR PTT broadcasts (OS-360 spec)
+            addAction("qmstar.keyflag.ptt.down")
+            addAction("qmstar.keyflag.ptt.up")
+
+            // UNIPRO Custom Key 1 (P2) broadcasts
+            addAction("unipro.hotkey.p2.down")
+            addAction("unipro.hotkey.p2.up")
+            addAction("unipro.hotkey.p2.long")
+
+            // UNIPRO Custom Key 2 (P3) broadcasts
+            addAction("unipro.hotkey.p3.down")
+            addAction("unipro.hotkey.p3.up")
+            addAction("unipro.hotkey.p3.long")
+
+            // SOS button broadcasts (both formats)
             addAction("android.intent.action.SOS.down")
             addAction("android.intent.action.SOS.up")
             addAction("android.intent.action.SOS.shortpress")
             addAction("android.intent.action.SOS.longpress")
+            addAction("android.intent.action.sos.down")
+            addAction("android.intent.action.sos.up")
+            addAction("android.intent.action.sos.long")
+
+            // Channel switching broadcasts
+            addAction("android.intent.ptt.channelUp")
+            addAction("android.intent.ptt.channelDown")
         }
 
         try {
@@ -390,7 +511,7 @@ class MainActivity : FlutterActivity() {
             } else {
                 registerReceiver(pttBroadcastReceiver, filter)
             }
-            android.util.Log.d("VoicelyPTT", "Registered Inrico T310 PTT broadcast receiver")
+            android.util.Log.d("VoicelyPTT", "Registered PTT broadcast receiver for Inrico/QMSTAR/UNIPRO devices")
         } catch (e: Exception) {
             android.util.Log.e("VoicelyPTT", "Failed to register PTT broadcast receiver: ${e.message}", e)
         }
@@ -1324,6 +1445,99 @@ class MainActivity : FlutterActivity() {
      * Set audio mode for regular media playback (not voice communication)
      * This resets from MODE_IN_COMMUNICATION to MODE_NORMAL for louder speaker output
      */
+    /**
+     * Ensure minimum voice call volume for better audio clarity
+     * This is especially important when user has low volume set
+     * @param minPercent Minimum volume as percentage of max (e.g., 50 = 50%)
+     * @return Map with previous and new volume levels
+     */
+    private fun ensureMinimumVoiceVolume(minPercent: Int): Map<String, Any> {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        try {
+            val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
+            val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+            val minVolume = (maxVolume * minPercent) / 100
+
+            if (currentVolume < minVolume) {
+                audioManager.setStreamVolume(
+                    AudioManager.STREAM_VOICE_CALL,
+                    minVolume,
+                    0 // No flags - silent change
+                )
+                android.util.Log.d("VoicelyAudio", "Boosted voice volume from $currentVolume to $minVolume (min $minPercent%)")
+                return mapOf(
+                    "previousVolume" to currentVolume,
+                    "newVolume" to minVolume,
+                    "maxVolume" to maxVolume,
+                    "boosted" to true
+                )
+            }
+
+            return mapOf(
+                "previousVolume" to currentVolume,
+                "newVolume" to currentVolume,
+                "maxVolume" to maxVolume,
+                "boosted" to false
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyAudio", "Failed to ensure minimum volume", e)
+            return mapOf("error" to e.message.orEmpty(), "boosted" to false)
+        }
+    }
+
+    /**
+     * Boost voice call volume to maximum for clearer PTT audio
+     * @return Map with previous and new volume levels
+     */
+    private fun boostVoiceCallVolume(): Map<String, Any> {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        try {
+            val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
+            val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+
+            // Set to 80% of max for good clarity without distortion
+            val targetVolume = (maxVolume * 80) / 100
+
+            if (currentVolume < targetVolume) {
+                audioManager.setStreamVolume(
+                    AudioManager.STREAM_VOICE_CALL,
+                    targetVolume,
+                    0 // No flags - silent change
+                )
+                android.util.Log.d("VoicelyAudio", "Boosted voice volume from $currentVolume to $targetVolume")
+            }
+
+            // Also boost music stream as WebRTC may use it
+            val musicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            val maxMusicVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val targetMusicVolume = (maxMusicVolume * 80) / 100
+
+            if (musicVolume < targetMusicVolume) {
+                audioManager.setStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    targetMusicVolume,
+                    0
+                )
+                android.util.Log.d("VoicelyAudio", "Boosted music volume from $musicVolume to $targetMusicVolume")
+            }
+
+            return mapOf(
+                "voicePreviousVolume" to currentVolume,
+                "voiceNewVolume" to if (currentVolume < targetVolume) targetVolume else currentVolume,
+                "voiceMaxVolume" to maxVolume,
+                "musicPreviousVolume" to musicVolume,
+                "musicNewVolume" to if (musicVolume < targetMusicVolume) targetMusicVolume else musicVolume,
+                "musicMaxVolume" to maxMusicVolume,
+                "boosted" to (currentVolume < targetVolume || musicVolume < targetMusicVolume)
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyAudio", "Failed to boost volume", e)
+            return mapOf("error" to e.message.orEmpty(), "boosted" to false)
+        }
+    }
+
     private fun setAudioModeForPlayback() {
         val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 

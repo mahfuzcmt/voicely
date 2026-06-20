@@ -231,4 +231,33 @@ class NativeAudioService {
       return false;
     }
   }
+
+  /// Ensure minimum voice volume for clearer audio
+  /// @param minPercent Minimum volume as percentage (default 50%)
+  /// Returns map with boosted status and volume levels
+  static Future<Map<String, dynamic>> ensureMinimumVoiceVolume({int minPercent = 50}) async {
+    try {
+      final result = await _channel.invokeMethod('ensureMinimumVoiceVolume', {
+        'minPercent': minPercent,
+      });
+      debugPrint('NativeAudio: ensureMinimumVoiceVolume = $result');
+      return Map<String, dynamic>.from(result);
+    } catch (e) {
+      debugPrint('NativeAudio: Error ensuring minimum volume: $e');
+      return {'boosted': false, 'error': e.toString()};
+    }
+  }
+
+  /// Boost voice call volume to 80% for clearer PTT audio
+  /// This helps when user has low volume set
+  static Future<Map<String, dynamic>> boostVoiceCallVolume() async {
+    try {
+      final result = await _channel.invokeMethod('boostVoiceCallVolume');
+      debugPrint('NativeAudio: boostVoiceCallVolume = $result');
+      return Map<String, dynamic>.from(result);
+    } catch (e) {
+      debugPrint('NativeAudio: Error boosting volume: $e');
+      return {'boosted': false, 'error': e.toString()};
+    }
+  }
 }

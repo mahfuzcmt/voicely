@@ -310,11 +310,20 @@ class SimpleLiveStreamingService {
       // Configure audio mode for broadcasting
       await NativeAudioService.setAudioModeForBroadcasting();
 
+      // Enhanced audio constraints for better voice quality
       final constraints = {
         'audio': {
           'echoCancellation': true,
           'noiseSuppression': true,
           'autoGainControl': true,
+          // Additional settings for better voice clarity
+          'googEchoCancellation': true,
+          'googAutoGainControl': true,
+          'googNoiseSuppression': true,
+          'googHighpassFilter': true,
+          'googTypingNoiseDetection': true,
+          // Don't specify sample rate - let WebRTC use optimal (usually 48kHz)
+          // Specifying lower rates can cause playback speed issues
         },
         'video': false,
       };
@@ -752,11 +761,15 @@ class SimpleLiveStreamingService {
         return;
       }
 
-      await pc.setLocalDescription(offer);
+      // Optimize SDP for better voice quality broadcasting
+      final optimizedSdp = _optimizeSdpForVoiceBroadcasting(offer.sdp!);
+      final optimizedOffer = RTCSessionDescription(optimizedSdp, offer.type);
+
+      await pc.setLocalDescription(optimizedOffer);
 
       _wsService.sendOffer(
         roomId: channelId,
-        sdp: offer.sdp!,
+        sdp: optimizedSdp,
         targetUserId: listenerId,
       );
 
@@ -811,24 +824,29 @@ class SimpleLiveStreamingService {
         init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
       );
 
-      // Set remote description
-      await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+      // Set remote description with optimized audio settings
+      final optimizedSdp = _optimizeSdpForVoiceReceiving(sdp);
+      await pc.setRemoteDescription(RTCSessionDescription(optimizedSdp, 'offer'));
 
       // Apply pending ICE candidates for this peer
       await _applyPendingIceCandidatesFor(fromUserId);
 
-      // Create answer
+      // Create answer with optimized audio settings
       final answer = await pc.createAnswer({
         'offerToReceiveAudio': true,
         'offerToReceiveVideo': false,
       });
 
-      await pc.setLocalDescription(answer);
+      // Optimize SDP for better voice receiving quality
+      final optimizedAnswerSdp = _optimizeSdpForVoiceReceiving(answer.sdp!);
+      final optimizedAnswer = RTCSessionDescription(optimizedAnswerSdp, answer.type);
+
+      await pc.setLocalDescription(optimizedAnswer);
 
       _wsService.sendAnswer(
         roomId: channelId,
         targetUserId: fromUserId,
-        sdp: answer.sdp!,
+        sdp: optimizedAnswerSdp,
       );
 
       debugPrint('SimpleStream: Answer sent to $fromUserId');
@@ -943,7 +961,16 @@ class SimpleLiveStreamingService {
       'rtcpMuxPolicy': 'require',
     };
 
-    final pc = await createPeerConnection(configuration);
+    // Additional constraints for better audio quality
+    final constraints = {
+      'mandatory': {},
+      'optional': [
+        {'googCpuOveruseDetection': false}, // Disable CPU overuse detection for consistent audio
+        {'googDscp': true}, // Enable DSCP for QoS
+      ],
+    };
+
+    final pc = await createPeerConnection(configuration, constraints);
 
     // Handle ICE candidates
     pc.onIceCandidate = (RTCIceCandidate candidate) {
@@ -1063,6 +1090,16 @@ class SimpleLiveStreamingService {
       // Step 3: Enable speaker output
       await NativeAudioService.setSpeakerOn(true);
 
+      // Step 4: Boost volume for clearer audio (especially at low volumes)
+      try {
+        final volumeResult = await NativeAudioService.boostVoiceCallVolume();
+        if (volumeResult['boosted'] == true) {
+          debugPrint('SimpleStream: Volume boosted for clearer audio');
+        }
+      } catch (e) {
+        debugPrint('SimpleStream: Volume boost failed (non-critical): $e');
+      }
+
       debugPrint('SimpleStream: Audio activated successfully for track');
     } catch (e) {
       debugPrint('SimpleStream: Initial audio activation failed: $e');
@@ -1073,6 +1110,8 @@ class SimpleLiveStreamingService {
       try {
         await NativeAudioService.setAudioModeForVoiceChat();
         await NativeAudioService.setSpeakerOn(true);
+        // Also try volume boost on retry
+        await NativeAudioService.boostVoiceCallVolume();
         debugPrint('SimpleStream: Audio activation retry succeeded');
       } catch (e2) {
         debugPrint('SimpleStream: Audio activation retry failed: $e2');
@@ -1363,6 +1402,109 @@ class SimpleLiveStreamingService {
       _stateController.add(newState);
       debugPrint('SimpleStream state: $newState');
     }
+  }
+
+  /// Optimize SDP for better voice quality when receiving audio
+  /// This modifies Opus codec parameters for higher bitrate and better clarity
+  String _optimizeSdpForVoiceReceiving(String sdp) {
+    // Find the Opus codec line and add optimized parameters
+    // Opus params: maxaveragebitrate=128000 (128kbps for clear voice)
+    //              stereo=0 (mono for voice)
+    //              useinbandfec=1 (forward error correction)
+    //              usedtx=0 (disable discontinuous transmission)
+    //              maxplaybackrate=48000 (full sample rate)
+    //              sprop-maxcapturerate=48000
+    //              minptime=10 (minimum packet time)
+    //              ptime=20 (packet time)
+
+    final lines = sdp.split('\n');
+    final result = <String>[];
+
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      result.add(line);
+
+      // After the Opus rtpmap line, add fmtp line with optimized params
+      // Look for: a=rtpmap:111 opus/48000/2
+      if (line.contains('opus/48000')) {
+        // Extract payload type (usually 111)
+        final match = RegExp(r'a=rtpmap:(\d+)\s+opus').firstMatch(line);
+        if (match != null) {
+          final payloadType = match.group(1);
+
+          // Check if next line already has fmtp for this payload
+          bool hasExistingFmtp = false;
+          for (int j = i + 1; j < lines.length && j < i + 5; j++) {
+            if (lines[j].startsWith('a=fmtp:$payloadType')) {
+              // Modify existing fmtp line to add our parameters
+              final existingFmtp = lines[j];
+
+              // Add our optimized parameters if not present
+              String newFmtp = existingFmtp;
+              if (!newFmtp.contains('maxaveragebitrate')) {
+                newFmtp = '$newFmtp;maxaveragebitrate=128000';
+              }
+              if (!newFmtp.contains('useinbandfec')) {
+                newFmtp = '$newFmtp;useinbandfec=1';
+              }
+              if (!newFmtp.contains('usedtx')) {
+                newFmtp = '$newFmtp;usedtx=0';
+              }
+              if (!newFmtp.contains('maxplaybackrate')) {
+                newFmtp = '$newFmtp;maxplaybackrate=48000';
+              }
+              if (!newFmtp.contains('stereo')) {
+                newFmtp = '$newFmtp;stereo=0';
+              }
+
+              // Replace the line in the original array
+              lines[j] = newFmtp;
+              hasExistingFmtp = true;
+              break;
+            }
+          }
+
+          // If no existing fmtp, we'll add it when we encounter the line
+          // (already handled above by modifying lines array)
+        }
+      }
+    }
+
+    final optimizedSdp = result.join('\n');
+    debugPrint('SimpleStream: SDP optimized for voice receiving');
+    return optimizedSdp;
+  }
+
+  /// Optimize SDP for better voice quality when broadcasting
+  /// Higher bitrate and quality settings for outgoing audio
+  String _optimizeSdpForVoiceBroadcasting(String sdp) {
+    final lines = sdp.split('\n');
+    final result = <String>[];
+
+    for (final line in lines) {
+      if (line.startsWith('a=fmtp:') && line.contains('opus')) {
+        // Add optimized Opus parameters for broadcasting
+        String newLine = line;
+        if (!newLine.contains('maxaveragebitrate')) {
+          newLine = '$newLine;maxaveragebitrate=128000';
+        }
+        if (!newLine.contains('useinbandfec')) {
+          newLine = '$newLine;useinbandfec=1';
+        }
+        if (!newLine.contains('usedtx')) {
+          newLine = '$newLine;usedtx=0';
+        }
+        if (!newLine.contains('cbr')) {
+          newLine = '$newLine;cbr=0'; // Variable bitrate for better quality
+        }
+        result.add(newLine);
+      } else {
+        result.add(line);
+      }
+    }
+
+    debugPrint('SimpleStream: SDP optimized for voice broadcasting');
+    return result.join('\n');
   }
 
   /// Dispose resources
