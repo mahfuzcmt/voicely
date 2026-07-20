@@ -5,7 +5,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../core/services/hardware_ptt_service.dart';
-import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/extensions.dart';
 import '../../data/websocket_signaling_service.dart';
 import '../providers/simple_ptt_providers.dart';
@@ -26,11 +25,14 @@ class SimplePttButton extends ConsumerStatefulWidget {
 }
 
 class _SimplePttButtonState extends ConsumerState<SimplePttButton>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
+  late AnimationController _pressController;
+  late Animation<double> _pressAnimation;
   String? _lastSpeakerId;
   StreamSubscription<PttEvent>? _hardwarePttSubscription;
+  bool _isPressed = false;
 
   @override
   void initState() {
@@ -41,6 +43,15 @@ class _SimplePttButtonState extends ConsumerState<SimplePttButton>
     );
     _pulseAnimation = Tween<double>(begin: 1.0, end: 1.15).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
+    // Press animation for immediate tactile feedback
+    _pressController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 50),
+    );
+    _pressAnimation = Tween<double>(begin: 1.0, end: 0.95).animate(
+      CurvedAnimation(parent: _pressController, curve: Curves.easeOut),
     );
 
     _setupHardwarePttListener();
@@ -104,11 +115,40 @@ class _SimplePttButtonState extends ConsumerState<SimplePttButton>
   @override
   void dispose() {
     _pulseController.dispose();
+    _pressController.dispose();
     _hardwarePttSubscription?.cancel();
     super.dispose();
   }
 
+  /// Handle tap down for immediate visual feedback
+  void _onTapDown(TapDownDetails details) {
+    if (!_isPressed) {
+      _isPressed = true;
+      HapticFeedback.selectionClick();
+      _pressController.forward();
+    }
+  }
+
+  /// Handle tap up/cancel to reset visual state
+  void _onTapUp(TapUpDetails? details) {
+    if (_isPressed) {
+      _isPressed = false;
+      _pressController.reverse();
+    }
+  }
+
+  /// Handle tap cancel
+  void _onTapCancel() {
+    if (_isPressed) {
+      _isPressed = false;
+      _pressController.reverse();
+    }
+  }
+
   void _onTapToggle() async {
+    // Reset press animation
+    _onTapUp(null);
+
     try {
       final session = ref.read(simplePttSessionProvider(widget.channelId));
 
@@ -140,6 +180,9 @@ class _SimplePttButtonState extends ConsumerState<SimplePttButton>
         }
         return;
       }
+
+      // Wake up screen if it's off (for software PTT press)
+      HardwarePttService.wakeScreen();
 
       HapticFeedback.heavyImpact();
       _pulseController.repeat(reverse: true);
@@ -213,12 +256,18 @@ class _SimplePttButtonState extends ConsumerState<SimplePttButton>
           enabled: session.state != SimplePttState.error,
           label: _getAccessibilityLabel(session),
           child: GestureDetector(
+            onTapDown: _onTapDown,
+            onTapUp: _onTapUp,
+            onTapCancel: _onTapCancel,
             onTap: _onTapToggle,
             child: AnimatedBuilder(
-              animation: _pulseAnimation,
+              animation: Listenable.merge([_pulseAnimation, _pressAnimation]),
               builder: (context, child) {
+                final scale = session.isBroadcasting
+                    ? _pulseAnimation.value * _pressAnimation.value
+                    : _pressAnimation.value;
                 return Transform.scale(
-                  scale: session.isBroadcasting ? _pulseAnimation.value : 1.0,
+                  scale: scale,
                   child: child,
                 );
               },
@@ -241,10 +290,39 @@ class _SimplePttButtonState extends ConsumerState<SimplePttButton>
   }
 
   Widget _buildPttButtonDesign(SimplePttSessionState session) {
-    final ringColor = _getRingColor(session);
-    final iconColor = _getIconColor(session);
     final isActive =
         session.isBroadcasting || session.state == SimplePttState.requestingFloor;
+    final isListening = session.isListening;
+    final isError = session.state == SimplePttState.error;
+    final isDisconnected = !session.isConnected && !session.isConnecting;
+
+    // Professional dark theme colors
+    const darkCenter = Color(0xFF363B44);
+    const darkOuter = Color(0xFF2B3038);
+    const darkRing = Color(0xFF1E2228);
+    const orangeAccent = Color(0xFFF5A623);
+    const greenAccent = Color(0xFF4CAF50);
+    const redAccent = Color(0xFFE53935);
+
+    // Determine glow color based on state
+    Color? glowColor;
+    if (isActive) {
+      glowColor = session.isBroadcastTimeWarning ? redAccent : orangeAccent;
+    } else if (isListening) {
+      glowColor = greenAccent;
+    }
+
+    // Determine icon color
+    Color iconColor;
+    if (isError) {
+      iconColor = redAccent;
+    } else if (isDisconnected) {
+      iconColor = Colors.grey;
+    } else if (isListening) {
+      iconColor = greenAccent;
+    } else {
+      iconColor = orangeAccent;
+    }
 
     return SizedBox(
       width: widget.size,
@@ -252,194 +330,185 @@ class _SimplePttButtonState extends ConsumerState<SimplePttButton>
       child: Stack(
         alignment: Alignment.center,
         children: [
-          // Outer ring
+          // Glow effect when active or listening
+          if (glowColor != null)
+            Container(
+              width: widget.size,
+              height: widget.size,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: glowColor.withValues(alpha: 0.5),
+                    blurRadius: 25,
+                    spreadRadius: 5,
+                  ),
+                ],
+              ),
+            ),
+
+          // Outer dark ring with 3D bevel effect
           Container(
             width: widget.size,
             height: widget.size,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: Colors.grey[100],
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  darkRing.withValues(alpha: 0.8),
+                  darkOuter,
+                  const Color(0xFF151515),
+                ],
+              ),
+              boxShadow: [
+                // Outer shadow for depth
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  offset: const Offset(4, 4),
+                  blurRadius: 10,
+                ),
+                // Inner highlight
+                BoxShadow(
+                  color: Colors.white.withValues(alpha: 0.05),
+                  offset: const Offset(-2, -2),
+                  blurRadius: 6,
+                ),
+              ],
             ),
           ),
 
-          // Colored ring
+          // Inner button area with gradient
           Container(
             width: widget.size * 0.85,
             height: widget.size * 0.85,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              border: Border.all(
-                color: ringColor,
-                width: widget.size * 0.025,
+              gradient: RadialGradient(
+                center: Alignment.center,
+                radius: 0.8,
+                colors: [
+                  darkCenter,
+                  darkOuter,
+                ],
               ),
+              border: Border.all(
+                color: glowColor?.withValues(alpha: 0.6) ?? Colors.transparent,
+                width: glowColor != null ? 3 : 0,
+              ),
+              boxShadow: [
+                // Inset shadow effect
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.4),
+                  offset: const Offset(2, 2),
+                  blurRadius: 8,
+                ),
+              ],
             ),
           ),
 
-          // Center with icon and text
+          // Center icon area
           Container(
-            width: widget.size * 0.7,
-            height: widget.size * 0.7,
+            width: widget.size * 0.65,
+            height: widget.size * 0.65,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: Colors.white,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.1),
-                  blurRadius: 10,
-                  spreadRadius: 2,
-                ),
-              ],
+              gradient: RadialGradient(
+                center: const Alignment(0.1, -0.1),
+                radius: 1.0,
+                colors: [
+                  darkCenter.withValues(alpha: 0.9),
+                  darkOuter,
+                ],
+              ),
             ),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                // Main icon - larger, no text
                 Icon(
                   _getIcon(session),
-                  size: widget.size * 0.25,
+                  size: widget.size * 0.32,
                   color: iconColor,
                 ),
-                SizedBox(height: widget.size * 0.015),
-                _buildStateText(session, iconColor),
+                // Small status indicator below icon
+                if (session.isBroadcasting) ...[
+                  SizedBox(height: widget.size * 0.02),
+                  _buildRecordingIndicator(
+                    session.isBroadcastTimeWarning ? redAccent : orangeAccent,
+                  ),
+                  if (session.isBroadcastTimeWarning) ...[
+                    SizedBox(height: widget.size * 0.01),
+                    Text(
+                      '${session.remainingBroadcastSeconds}s',
+                      style: TextStyle(
+                        fontSize: widget.size * 0.07,
+                        color: redAccent,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ] else if (session.state == SimplePttState.requestingFloor) ...[
+                  SizedBox(height: widget.size * 0.02),
+                  SizedBox(
+                    width: widget.size * 0.08,
+                    height: widget.size * 0.08,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(orangeAccent),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
 
-          // Pulsing overlay when active
-          if (isActive)
-            Container(
-              width: widget.size * 0.85,
-              height: widget.size * 0.85,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: ringColor.withValues(alpha: 0.3),
-                  width: widget.size * 0.05,
+          // Listener count badge when broadcasting
+          if (session.isBroadcasting && session.listenerCount > 0)
+            Positioned(
+              right: widget.size * 0.08,
+              top: widget.size * 0.08,
+              child: Container(
+                padding: EdgeInsets.symmetric(
+                  horizontal: widget.size * 0.04,
+                  vertical: widget.size * 0.02,
+                ),
+                decoration: BoxDecoration(
+                  color: greenAccent,
+                  borderRadius: BorderRadius.circular(widget.size * 0.06),
+                  boxShadow: [
+                    BoxShadow(
+                      color: greenAccent.withValues(alpha: 0.5),
+                      blurRadius: 8,
+                      spreadRadius: 1,
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.headphones,
+                      size: widget.size * 0.06,
+                      color: Colors.white,
+                    ),
+                    SizedBox(width: widget.size * 0.015),
+                    Text(
+                      '${session.listenerCount}',
+                      style: TextStyle(
+                        fontSize: widget.size * 0.055,
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
         ],
       ),
     );
-  }
-
-  Widget _buildStateText(SimplePttSessionState session, Color iconColor) {
-    if (session.isBroadcasting) {
-      return Column(
-        children: [
-          _buildRecordingIndicator(
-            session.isBroadcastTimeWarning ? Colors.red : iconColor,
-          ),
-          SizedBox(height: widget.size * 0.015),
-          if (session.listenerCount > 0) ...[
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.headphones,
-                  size: widget.size * 0.055,
-                  color: Colors.green,
-                ),
-                SizedBox(width: widget.size * 0.01),
-                Text(
-                  '${session.listenerCount}',
-                  style: TextStyle(
-                    fontSize: widget.size * 0.06,
-                    color: Colors.green,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-            SizedBox(height: widget.size * 0.01),
-          ],
-          Text(
-            session.isBroadcastTimeWarning
-                ? '${session.remainingBroadcastSeconds}s'
-                : 'Tap to stop',
-            style: TextStyle(
-              fontSize: widget.size * 0.07,
-              color: session.isBroadcastTimeWarning
-                  ? Colors.red
-                  : Colors.orange[700],
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ],
-      );
-    } else if (session.state == SimplePttState.requestingFloor) {
-      return SizedBox(
-        width: widget.size * 0.1,
-        height: widget.size * 0.1,
-        child: CircularProgressIndicator(
-          strokeWidth: 2,
-          valueColor: AlwaysStoppedAnimation<Color>(iconColor),
-        ),
-      );
-    } else if (session.isListening) {
-      return Text(
-        'Listening',
-        style: TextStyle(
-          fontSize: widget.size * 0.07,
-          color: Colors.green,
-          fontWeight: FontWeight.bold,
-        ),
-      );
-    } else if (session.canBroadcast) {
-      return Text(
-        'Tap to speak',
-        style: TextStyle(
-          fontSize: widget.size * 0.07,
-          color: Colors.grey[600],
-          fontWeight: FontWeight.bold,
-        ),
-      );
-    } else if (!session.isConnected) {
-      return Text(
-        'Reconnect',
-        style: TextStyle(
-          fontSize: widget.size * 0.065,
-          color: Colors.grey[500],
-          fontWeight: FontWeight.bold,
-        ),
-      );
-    }
-    return const SizedBox.shrink();
-  }
-
-  Color _getRingColor(SimplePttSessionState session) {
-    switch (session.state) {
-      case SimplePttState.idle:
-        return session.isConnected ? Colors.orange : Colors.grey;
-      case SimplePttState.connecting:
-      case SimplePttState.requestingFloor:
-        return Colors.orange;
-      case SimplePttState.broadcasting:
-        return session.isBroadcastTimeWarning ? Colors.red : Colors.orange;
-      case SimplePttState.listening:
-        return Colors.green;
-      case SimplePttState.error:
-        return Colors.red;
-      case SimplePttState.disconnected:
-        return Colors.grey;
-    }
-  }
-
-  Color _getIconColor(SimplePttSessionState session) {
-    switch (session.state) {
-      case SimplePttState.idle:
-        return session.isConnected ? AppColors.primary : Colors.grey;
-      case SimplePttState.connecting:
-      case SimplePttState.requestingFloor:
-        return Colors.orange;
-      case SimplePttState.broadcasting:
-        return session.isBroadcastTimeWarning ? Colors.red : Colors.orange;
-      case SimplePttState.listening:
-        return Colors.green;
-      case SimplePttState.error:
-        return Colors.red;
-      case SimplePttState.disconnected:
-        return Colors.grey;
-    }
   }
 
   IconData _getIcon(SimplePttSessionState session) {
@@ -461,36 +530,52 @@ class _SimplePttButtonState extends ConsumerState<SimplePttButton>
   }
 
   Widget _buildSpeakerIndicator(SimplePttSessionState session) {
+    const greenAccent = Color(0xFF4CAF50);
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       decoration: BoxDecoration(
-        color: Colors.green.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.green.withValues(alpha: 0.3)),
+        color: const Color(0xFF1E2228),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: greenAccent.withValues(alpha: 0.5), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: greenAccent.withValues(alpha: 0.3),
+            blurRadius: 12,
+            spreadRadius: 1,
+          ),
+        ],
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(
-            Icons.volume_up,
-            size: 16,
-            color: Colors.green,
+          Container(
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: greenAccent.withValues(alpha: 0.2),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.volume_up,
+              size: 16,
+              color: greenAccent,
+            ),
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: 8),
           Text(
             session.currentSpeakerName ?? 'User',
             style: const TextStyle(
-              fontSize: 12,
-              color: Colors.green,
-              fontWeight: FontWeight.w500,
+              fontSize: 13,
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
             ),
           ),
-          const SizedBox(width: 4),
-          const Text(
+          const SizedBox(width: 6),
+          Text(
             'is speaking',
             style: TextStyle(
-              fontSize: 12,
-              color: Colors.green,
+              fontSize: 13,
+              color: Colors.white.withValues(alpha: 0.7),
             ),
           ),
         ],
