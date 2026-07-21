@@ -5,10 +5,10 @@ class AppConstants {
   static const String appVersion = '1.0.0';
 
   // WebSocket signaling server
-  // Production: wss://voicely.xyz
+  // Production: wss://voicelyent.xyz
   static const String signalingServerUrl = String.fromEnvironment(
     'SIGNALING_SERVER_URL',
-    defaultValue: 'wss://voicely.xyz',
+    defaultValue: 'wss://voicelyent.xyz',
   );
 
   // Live streaming settings
@@ -47,7 +47,7 @@ class AppConstants {
     // UDP only first for faster connection (no TCP fallback overhead)
     {
       'urls': [
-        'turn:voicely.xyz:3478', // UDP first - fastest
+        'turn:voicelyent.xyz:3478', // UDP first - fastest
       ],
       'username': 'voicely',
       'credential': 'VoicelyTurn2024Secure',
@@ -55,8 +55,8 @@ class AppConstants {
     // Secondary: Same server with TCP/TLS fallback (only if UDP fails)
     {
       'urls': [
-        'turn:voicely.xyz:3478?transport=tcp',
-        'turns:voicely.xyz:5349', // TLS requires hostname for certificate validation
+        'turn:voicelyent.xyz:3478?transport=tcp',
+        'turns:voicelyent.xyz:5349', // TLS requires hostname for certificate validation
       ],
       'username': 'voicely',
       'credential': 'VoicelyTurn2024Secure',
