@@ -5,8 +5,10 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/background_ptt_service.dart';
 import '../../../../core/services/native_audio_service.dart';
+import '../../../../core/services/native_websocket_service.dart';
 import '../../../../di/providers.dart';
 import '../../../channels/data/channel_repository.dart';
 import '../../data/simple_live_streaming_service.dart';
@@ -343,12 +345,16 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
         if (newState == SimplePttState.broadcasting) {
           state = state.copyWith(broadcastStartTime: DateTime.now());
           _startBroadcastTimer();
+          // Keep screen on while broadcasting
+          _enableWakelock();
           // Update notification to show broadcasting
           _backgroundService.updateNotification(
             title: 'Broadcasting',
             content: 'You are speaking',
           );
         } else if (newState == SimplePttState.listening) {
+          // Keep screen on while listening
+          _enableWakelock();
           // Wake up the screen when someone starts speaking
           // This ensures the user can see who is speaking
           NativeAudioService.wakeScreen().catchError((e) {
@@ -356,9 +362,13 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
           });
         } else if (newState == SimplePttState.idle) {
           _stopBroadcastTimer();
+          // Allow screen to turn off when idle
+          _disableWakelock();
           _backgroundService.notifyIdle();
         } else {
           _stopBroadcastTimer();
+          // Allow screen to turn off when disconnected/error
+          _disableWakelock();
         }
       }
     });
@@ -410,7 +420,9 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
   }
 
   Future<void> _autoConnect() async {
-    await _enableWakelock();
+    // NOTE: Wakelock is NOT enabled here - screen should be allowed to turn off when idle
+    // Wakelock will be enabled only when actively broadcasting or listening
+    // The partial CPU wake lock (from BackgroundPttService) is sufficient for background connection
 
     // Start background service for keep-alive (runs even in background)
     await _startBackgroundKeepAlive();
@@ -451,6 +463,9 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
         _backgroundService.updateConnectionStatus(success);
         if (success) {
           _backgroundService.notifyIdle();
+
+          // Start native WebSocket service for PTT when screen is off
+          await _startNativeWebSocketService(token, displayName);
         }
       }
     } catch (e) {
@@ -459,6 +474,38 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
         errorMessage: 'Connection failed',
       );
       _backgroundService.notifyDisconnected();
+    }
+  }
+
+  /// Start native WebSocket service for PTT when screen is off
+  Future<void> _startNativeWebSocketService(String token, String? displayName) async {
+    try {
+      final nativeService = NativeWebSocketService.instance;
+
+      // Check if already running
+      final isRunning = await nativeService.checkIsRunning();
+      if (isRunning) {
+        debugPrint('SimplePTT: Native WebSocket service already running');
+        // Just join the room
+        await nativeService.joinRoom(channelId);
+        return;
+      }
+
+      // Start the native service
+      final started = await nativeService.startService(
+        serverUrl: AppConstants.signalingServerUrl,
+        authToken: token,
+        displayName: displayName,
+        roomId: channelId,
+      );
+
+      if (started) {
+        debugPrint('SimplePTT: Native WebSocket service started for PTT when screen off');
+      } else {
+        debugPrint('SimplePTT: Failed to start native WebSocket service');
+      }
+    } catch (e) {
+      debugPrint('SimplePTT: Error starting native WebSocket service: $e');
     }
   }
 
