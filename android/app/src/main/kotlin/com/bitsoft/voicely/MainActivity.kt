@@ -73,8 +73,14 @@ class MainActivity : FlutterActivity() {
     // Inrico T310 PTT broadcast receiver
     private var pttBroadcastReceiver: BroadcastReceiver? = null
 
+    // Receiver for PTT events from WebSocketService (when screen was off)
+    private var servicePttReceiver: BroadcastReceiver? = null
+
     // Partial wake lock for keeping CPU awake during background operation
     private var partialWakeLock: PowerManager.WakeLock? = null
+
+    // Track if PTT was started by service (screen was off)
+    private var pttStartedByService = false
 
     // Event channel for WebSocket messages
     private var webSocketEventSink: io.flutter.plugin.common.EventChannel.EventSink? = null
@@ -323,6 +329,78 @@ class MainActivity : FlutterActivity() {
 
         // Register Inrico T310 PTT broadcast receiver
         registerPttBroadcastReceiver()
+
+        // Register receiver for PTT events from WebSocketService
+        registerServicePttReceiver()
+
+        // Check if launched with PTT_START intent (from WebSocketService when screen was off)
+        handlePttStartIntent(intent)
+    }
+
+    /**
+     * Handle new intents when activity is already running (singleTop mode)
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handlePttStartIntent(intent)
+    }
+
+    /**
+     * Check if the intent contains PTT_START flag and trigger PTT if so
+     */
+    private fun handlePttStartIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra("PTT_START", false) == true) {
+            val timestamp = intent.getLongExtra("PTT_TIMESTAMP", 0)
+            android.util.Log.d("VoicelyPTT", "Received PTT_START intent, timestamp=$timestamp")
+
+            // Clear the flag so it doesn't trigger again on config changes
+            intent.removeExtra("PTT_START")
+            intent.removeExtra("PTT_TIMESTAMP")
+
+            // Mark that PTT was started by service
+            pttStartedByService = true
+            isPttButtonPressed = true
+
+            // Send PTT down event to Flutter (with small delay to ensure Flutter is ready)
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                sendPttEventSafe("ptt_down", 141, "service_wakeup")
+                android.util.Log.d("VoicelyPTT", "Sent PTT down event from service wakeup")
+            }, 300) // 300ms delay to allow Flutter to initialize
+        }
+    }
+
+    /**
+     * Register receiver for PTT UP events from WebSocketService
+     */
+    private fun registerServicePttReceiver() {
+        servicePttReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    "com.bitsoft.voicely.PTT_UP_FROM_SERVICE" -> {
+                        android.util.Log.d("VoicelyPTT", "Received PTT_UP_FROM_SERVICE broadcast")
+                        if (pttStartedByService && isPttButtonPressed) {
+                            isPttButtonPressed = false
+                            pttStartedByService = false
+                            sendPttEventSafe("ptt_up", 141, "service_wakeup")
+                            android.util.Log.d("VoicelyPTT", "Sent PTT up event from service broadcast")
+                        }
+                    }
+                }
+            }
+        }
+
+        val filter = IntentFilter("com.bitsoft.voicely.PTT_UP_FROM_SERVICE")
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(servicePttReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(servicePttReceiver, filter)
+            }
+            android.util.Log.d("VoicelyPTT", "Registered service PTT receiver")
+        } catch (e: Exception) {
+            android.util.Log.e("VoicelyPTT", "Failed to register service PTT receiver: ${e.message}", e)
+        }
     }
 
     /**
@@ -1412,7 +1490,7 @@ class MainActivity : FlutterActivity() {
 
     /**
      * Wake up the screen when PTT button is pressed
-     * Uses ACQUIRE_CAUSES_WAKEUP flag to turn on the display
+     * Uses multiple methods to ensure screen wakes on Android 8.1+ devices
      */
     private fun wakeScreen(): Boolean {
         return try {
@@ -1426,17 +1504,48 @@ class MainActivity : FlutterActivity() {
                 powerManager.isScreenOn
             }
 
+            android.util.Log.d("VoicelyPTT", "wakeScreen called, isScreenOn=$isScreenOn")
+
             if (!isScreenOn) {
-                // Create a wake lock that turns on the screen
+                // Method 1: Use wake lock with ACQUIRE_CAUSES_WAKEUP
+                // Use SCREEN_BRIGHT_WAKE_LOCK for better compatibility
+                @Suppress("DEPRECATION")
                 val wakeLock = powerManager.newWakeLock(
-                    PowerManager.FULL_WAKE_LOCK or
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
                     PowerManager.ACQUIRE_CAUSES_WAKEUP or
                     PowerManager.ON_AFTER_RELEASE,
                     "Voicely::ScreenWakeLock"
                 )
+                wakeLock.acquire(5000L) // 5 seconds
+                android.util.Log.d("VoicelyPTT", "Screen wake lock acquired (SCREEN_BRIGHT)")
 
-                // Acquire briefly to wake screen, then release
-                wakeLock.acquire(3000L) // 3 seconds
+                // Method 2: Also set window flags on main thread
+                runOnUiThread {
+                    try {
+                        // Turn screen on via window flags
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                            setShowWhenLocked(true)
+                            setTurnScreenOn(true)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            window.addFlags(
+                                android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                                android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                                android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+                            )
+                        }
+                        android.util.Log.d("VoicelyPTT", "Window flags set for screen wake")
+
+                        // Method 3: Dismiss keyguard if present
+                        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            keyguardManager?.requestDismissKeyguard(this, null)
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("VoicelyPTT", "Window flags error: ${e.message}")
+                    }
+                }
+
                 android.util.Log.d("VoicelyPTT", "Screen woken up by PTT button")
             }
             true
@@ -1461,6 +1570,16 @@ class MainActivity : FlutterActivity() {
             }
         }
         pttBroadcastReceiver = null
+        // Unregister service PTT receiver
+        servicePttReceiver?.let {
+            try {
+                unregisterReceiver(it)
+                android.util.Log.d("VoicelyPTT", "Unregistered service PTT receiver")
+            } catch (e: Exception) {
+                android.util.Log.e("VoicelyPTT", "Error unregistering service PTT receiver", e)
+            }
+        }
+        servicePttReceiver = null
         super.onDestroy()
     }
 }

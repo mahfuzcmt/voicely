@@ -1,8 +1,10 @@
 package com.bitsoft.voicely
 
 import android.app.*
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -114,6 +116,140 @@ class WebSocketService : Service() {
     private var reconnectAttempts = 0
     private var isConnected = false
     private var isAuthenticated = false
+    private var pttReceiverRegistered = false
+
+    // Track PTT state from service broadcasts
+    @Volatile
+    private var isPttPressedFromService = false
+
+    // Dynamic PTT broadcast receiver for screen wake and PTT trigger
+    private val pttBroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            Log.d(TAG, "PTT broadcast received in service: ${intent.action}")
+            when (intent.action) {
+                "android.intent.action.PTT.down",
+                "com.myt.action.PTT_DOWN",
+                "com.freeme.action.PTT_DOWN" -> {
+                    if (!isPttPressedFromService) {
+                        isPttPressedFromService = true
+                        Log.d(TAG, "PTT DOWN - waking screen and starting PTT")
+                        wakeScreenAndStartPtt()
+                    }
+                }
+                "android.intent.action.PTT.up",
+                "com.myt.action.PTT_UP",
+                "com.freeme.action.PTT_UP" -> {
+                    if (isPttPressedFromService) {
+                        isPttPressedFromService = false
+                        Log.d(TAG, "PTT UP - stopping PTT")
+                        sendPttUpToApp()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Wake the screen and launch the app with PTT start flag.
+     * This is called when PTT button is pressed while screen is off.
+     */
+    private fun wakeScreenAndStartPtt() {
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val isScreenOn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
+                powerManager.isInteractive
+            } else {
+                @Suppress("DEPRECATION")
+                powerManager.isScreenOn
+            }
+
+            Log.d(TAG, "wakeScreenAndStartPtt: isScreenOn=$isScreenOn")
+
+            // Acquire wake lock to turn on screen
+            @Suppress("DEPRECATION")
+            val screenWakeLock = powerManager.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                PowerManager.ON_AFTER_RELEASE,
+                "Voicely::ServiceScreenWakeLock"
+            )
+            screenWakeLock.acquire(10000L)
+            Log.d(TAG, "Screen wake lock acquired from service")
+
+            // Launch app with PTT_START flag
+            try {
+                val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+                if (launchIntent != null) {
+                    launchIntent.addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    )
+                    // Add extra to tell MainActivity to start PTT
+                    launchIntent.putExtra("PTT_START", true)
+                    launchIntent.putExtra("PTT_TIMESTAMP", System.currentTimeMillis())
+                    startActivity(launchIntent)
+                    Log.d(TAG, "App launched from service with PTT_START=true")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to launch app: ${e.message}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "wakeScreenAndStartPtt error: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Send PTT UP event to the app when button is released.
+     * This handles the case where PTT was started from service when screen was off.
+     */
+    private fun sendPttUpToApp() {
+        try {
+            // Send broadcast that MainActivity can receive
+            val intent = Intent("com.bitsoft.voicely.PTT_UP_FROM_SERVICE")
+            intent.setPackage(packageName)
+            sendBroadcast(intent)
+            Log.d(TAG, "Sent PTT_UP_FROM_SERVICE broadcast")
+        } catch (e: Exception) {
+            Log.e(TAG, "sendPttUpToApp error: ${e.message}", e)
+        }
+    }
+
+    private fun registerPttReceiver() {
+        if (pttReceiverRegistered) return
+        try {
+            val filter = IntentFilter().apply {
+                addAction("android.intent.action.PTT.down")
+                addAction("android.intent.action.PTT.up")
+                addAction("android.intent.action.PTT.longpress")
+                addAction("com.myt.action.PTT_DOWN")
+                addAction("com.myt.action.PTT_UP")
+                addAction("com.freeme.action.PTT_DOWN")
+                addAction("com.freeme.action.PTT_UP")
+                priority = IntentFilter.SYSTEM_HIGH_PRIORITY
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(pttBroadcastReceiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(pttBroadcastReceiver, filter)
+            }
+            pttReceiverRegistered = true
+            Log.d(TAG, "PTT broadcast receiver registered in service")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register PTT receiver: ${e.message}")
+        }
+    }
+
+    private fun unregisterPttReceiver() {
+        if (!pttReceiverRegistered) return
+        try {
+            unregisterReceiver(pttBroadcastReceiver)
+            pttReceiverRegistered = false
+            Log.d(TAG, "PTT broadcast receiver unregistered")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to unregister PTT receiver: ${e.message}")
+        }
+    }
 
     private val reconnectRunnable = Runnable { connect() }
     private val handler = Handler(Looper.getMainLooper())
@@ -148,6 +284,9 @@ class WebSocketService : Service() {
 
         createNotificationChannel()
         acquireWakeLock()
+
+        // Register PTT broadcast receiver for screen wake
+        registerPttReceiver()
 
         // Start wake lock renewal (runs every 10 minutes to keep alive indefinitely)
         handler.postDelayed(wakeLockRenewalRunnable, WAKELOCK_RENEWAL_INTERVAL_MS)
@@ -187,6 +326,9 @@ class WebSocketService : Service() {
         Log.d(TAG, "WebSocketService destroyed")
         isRunning = false
         instance = null
+
+        // Unregister PTT receiver
+        unregisterPttReceiver()
 
         handler.removeCallbacks(reconnectRunnable)
         handler.removeCallbacks(wakeLockRenewalRunnable)
