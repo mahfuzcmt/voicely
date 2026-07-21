@@ -399,8 +399,11 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
     // Make sure background service is running
     await _startBackgroundService();
 
-    // Keep wakelock enabled
-    await _enableWakelock();
+    // Only keep wakelock enabled if actively broadcasting or listening
+    // This allows the screen to turn off when idle in background
+    if (state.isBroadcasting || state.isListening) {
+      await _enableWakelock();
+    }
 
     // Update notification
     if (state.currentSpeakerName != null) {
@@ -576,8 +579,15 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
         if (newState == LivePttState.broadcasting) {
           state = state.copyWith(broadcastStartTime: DateTime.now());
           _startBroadcastTimer();
+          // Keep screen on while broadcasting
+          _enableWakelock();
+        } else if (newState == LivePttState.listening) {
+          // Keep screen on while listening
+          _enableWakelock();
         } else {
           _stopBroadcastTimer();
+          // Allow screen to turn off when idle/disconnected
+          _disableWakelock();
         }
       }
     });
@@ -701,15 +711,9 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
       await _startNativeWebSocketService();
     }
 
-    // Enable wakelock with timeout
-    try {
-      await _enableWakelock().timeout(
-        _initTimeout,
-        onTimeout: () => debugPrint('LivePTT: Wakelock enable timed out'),
-      );
-    } catch (e) {
-      debugPrint('LivePTT: Wakelock error: $e');
-    }
+    // NOTE: Wakelock is NOT enabled here - screen should be allowed to turn off when idle
+    // Wakelock will be enabled only when actively broadcasting or listening
+    // The partial CPU wake lock (from BackgroundPttService) is sufficient for background connection
 
     // Request battery optimization exemption with timeout
     try {

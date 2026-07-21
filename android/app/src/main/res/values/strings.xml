@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Voicely</string>
+    <string name="ptt_accessibility_service_description">Enables PTT button to wake screen and start broadcasting even when display is off. Required for hardware PTT button support.</string>
+</resources>

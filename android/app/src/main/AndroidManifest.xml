@@ -32,6 +32,9 @@
     <!-- Wake lock for audio -->
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
+    <!-- Dismiss keyguard for PTT wake -->
+    <uses-permission android:name="android.permission.DISABLE_KEYGUARD"/>
+
     <!-- Vibration for haptic feedback -->
     <uses-permission android:name="android.permission.VIBRATE"/>
 
@@ -128,6 +131,44 @@
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>
+
+        <!-- PTT Button Receiver for handling hardware PTT when screen is off -->
+        <receiver
+            android:name=".PttButtonReceiver"
+            android:exported="true"
+            android:enabled="true"
+            android:directBootAware="true">
+            <intent-filter android:priority="2147483647">
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+            <!-- Chinese PTT device broadcasts - MYT/Mytetra V960 -->
+            <intent-filter android:priority="2147483647">
+                <action android:name="android.intent.action.PTT.down" />
+                <action android:name="android.intent.action.PTT.up" />
+                <action android:name="android.intent.action.PTT.longpress" />
+            </intent-filter>
+            <!-- Additional PTT broadcast actions -->
+            <intent-filter android:priority="2147483647">
+                <action android:name="com.myt.action.PTT_DOWN" />
+                <action android:name="com.myt.action.PTT_UP" />
+                <action android:name="com.freeme.action.PTT_DOWN" />
+                <action android:name="com.freeme.action.PTT_UP" />
+            </intent-filter>
+        </receiver>
+
+        <!-- PTT Accessibility Service for capturing key events when screen is off -->
+        <service
+            android:name=".PttAccessibilityService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:label="Voicely PTT Service">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/ptt_accessibility_service_config" />
+        </service>
     </application>
 
     <queries>
