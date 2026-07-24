@@ -370,6 +370,12 @@ class WebSocketSignalingService {
       return false;
     }
 
+    // Already connected and authenticated - no need to reconnect
+    if (_connectionState == WSConnectionState.authenticated && _channel != null) {
+      debugPrint('WS: Already authenticated and connected, skipping reconnect');
+      return true;
+    }
+
     // Check network connectivity before attempting connection
     try {
       final connectivityResult = await Connectivity().checkConnectivity();

@@ -464,8 +464,10 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
         if (success) {
           _backgroundService.notifyIdle();
 
-          // Start native WebSocket service for PTT when screen is off
-          await _startNativeWebSocketService(token, displayName);
+          // NOTE: Native WebSocket service disabled to prevent duplicate connections
+          // The Flutter WebSocket with background service should handle keep-alive
+          // TODO: Re-enable only when screen goes off, not on initial connect
+          // await _startNativeWebSocketService(token, displayName);
         }
       }
     } catch (e) {
