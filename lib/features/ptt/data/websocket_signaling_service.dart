@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -266,17 +268,27 @@ class WebSocketSignalingService {
   StreamSubscription? _subscription;
   Timer? _heartbeatTimer;
   Timer? _reconnectTimer;
+  Timer? _healthCheckTimer;
 
   String? _authToken;
   String? _userId;
   String? _displayName;
 
   int _reconnectAttempts = 0;
-  static const int _maxReconnectAttempts = 5;
+  /// Increased from 5 to 100 for production reliability with 1000+ users
+  static const int _maxReconnectAttempts = 100;
   /// Heartbeat interval reduced to 10 seconds for better background keep-alive
   static const Duration _heartbeatInterval = Duration(seconds: 10);
   static const Duration _initialReconnectDelay = Duration(seconds: 1);
+  /// Cap reconnect delay at 30 seconds to ensure reasonable recovery time
+  static const Duration _maxReconnectDelay = Duration(seconds: 30);
   static const int _maxMissedPongs = 3;
+  /// Maximum jitter to add to reconnect delay (prevents thundering herd)
+  static const int _maxJitterMs = 1000;
+  /// Health check interval - catches zombie/half-open connections
+  static const Duration _healthCheckInterval = Duration(seconds: 45);
+  /// Max time without pong before forcing reconnect
+  static const Duration _maxPongStaleness = Duration(seconds: 40);
 
   // Connection lock to prevent concurrent connect/disconnect operations
   bool _isConnecting = false;
@@ -287,6 +299,12 @@ class WebSocketSignalingService {
   // PONG tracking for dead connection detection
   int _missedPongs = 0;
   bool _awaitingPong = false;
+  DateTime? _lastPongTime;
+
+  // Network connectivity monitoring
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+  bool _hasNetworkConnection = true;
+  final _random = Random();
 
   // State
   WSConnectionState _connectionState = WSConnectionState.disconnected;
@@ -350,6 +368,25 @@ class WebSocketSignalingService {
         _connectionState == WSConnectionState.authenticating) {
       debugPrint('WS: Already connecting/authenticating, skipping');
       return false;
+    }
+
+    // Check network connectivity before attempting connection
+    try {
+      final connectivityResult = await Connectivity().checkConnectivity();
+      _hasNetworkConnection = connectivityResult.isNotEmpty &&
+          !connectivityResult.contains(ConnectivityResult.none);
+
+      if (!_hasNetworkConnection) {
+        debugPrint('WS: No network connection available, starting connectivity monitoring');
+        _authToken = authToken;
+        _displayName = displayName;
+        _startConnectivityMonitoring();
+        _updateState(WSConnectionState.reconnecting);
+        return false;
+      }
+    } catch (e) {
+      debugPrint('WS: Failed to check connectivity: $e');
+      // Proceed anyway if connectivity check fails
     }
 
     _isConnecting = true;
@@ -428,6 +465,9 @@ class WebSocketSignalingService {
       // Start heartbeat after successful auth
       _startHeartbeat();
 
+      // Start network connectivity monitoring
+      _startConnectivityMonitoring();
+
       debugPrint('WS: Connection and auth successful');
       return true;
     } catch (e) {
@@ -455,6 +495,7 @@ class WebSocketSignalingService {
     _isConnecting = false;
 
     _stopHeartbeat();
+    _stopConnectivityMonitoring();
     await _subscription?.cancel();
     _subscription = null;
     await _channel?.sink.close();
@@ -462,6 +503,7 @@ class WebSocketSignalingService {
 
     _joinedRooms.clear();
     _roomMembers.clear();
+    _lastPongTime = null;
     _updateState(WSConnectionState.disconnected);
 
     Logger.d('WebSocket disconnected');
@@ -675,9 +717,11 @@ class WebSocketSignalingService {
           break;
 
         case WSMessageType.pong:
-          // Heartbeat response received - reset missed pong counter
+          // Heartbeat response received - reset missed pong counter and update timestamp
           _missedPongs = 0;
           _awaitingPong = false;
+          _lastPongTime = DateTime.now();
+          debugPrint('WS: Pong received, connection healthy');
           break;
 
         case WSMessageType.roomJoined:
@@ -999,26 +1043,52 @@ class WebSocketSignalingService {
     }
   }
 
-  /// Schedule reconnection attempt
+  /// Schedule reconnection attempt with exponential backoff, cap, and jitter
   void _scheduleReconnect() {
     if (_reconnectTimer != null) return;
     if (_authToken == null) return;
+
+    // Check network connectivity before attempting reconnect
+    if (!_hasNetworkConnection) {
+      Logger.d('No network connection, waiting for connectivity...');
+      _updateState(WSConnectionState.reconnecting);
+      return;
+    }
+
     if (_reconnectAttempts >= _maxReconnectAttempts) {
-      Logger.e('Max reconnect attempts reached');
+      Logger.e('Max reconnect attempts reached ($_maxReconnectAttempts)');
       _updateState(WSConnectionState.error);
+      // Reset attempts after a longer delay to allow recovery
+      Timer(const Duration(minutes: 5), () {
+        _reconnectAttempts = 0;
+        debugPrint('WS: Reset reconnect attempts after cooldown');
+      });
       return;
     }
 
     _reconnectAttempts++;
-    final delay = _initialReconnectDelay * (1 << (_reconnectAttempts - 1));
 
-    Logger.d('Scheduling reconnect in ${delay.inSeconds}s (attempt $_reconnectAttempts)');
+    // Calculate delay with exponential backoff
+    var delayMs = _initialReconnectDelay.inMilliseconds * (1 << (_reconnectAttempts - 1));
+
+    // Cap at max delay (30 seconds)
+    delayMs = delayMs.clamp(0, _maxReconnectDelay.inMilliseconds);
+
+    // Add random jitter to prevent thundering herd with 1000+ users
+    final jitterMs = _random.nextInt(_maxJitterMs);
+    delayMs += jitterMs;
+
+    final delay = Duration(milliseconds: delayMs);
+
+    Logger.d('Scheduling reconnect in ${delay.inMilliseconds}ms (attempt $_reconnectAttempts/$_maxReconnectAttempts, jitter: ${jitterMs}ms)');
     _updateState(WSConnectionState.reconnecting);
 
     _reconnectTimer = Timer(delay, () {
       _reconnectTimer = null;
-      if (_authToken != null) {
+      if (_authToken != null && _hasNetworkConnection) {
         connect(_authToken!, displayName: _displayName);
+      } else if (!_hasNetworkConnection) {
+        debugPrint('WS: Network lost during reconnect delay, waiting...');
       }
     });
   }
@@ -1028,9 +1098,43 @@ class WebSocketSignalingService {
     _stopHeartbeat();
     _missedPongs = 0;
     _awaitingPong = false;
+    _lastPongTime = DateTime.now(); // Initialize to now on fresh connection
+
     _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
       sendPing();
     });
+
+    // Start health check timer to catch zombie connections
+    _healthCheckTimer = Timer.periodic(_healthCheckInterval, (_) {
+      _performHealthCheck();
+    });
+  }
+
+  /// Perform connection health check - catches half-open/zombie connections
+  void _performHealthCheck() {
+    if (!isConnected) return;
+
+    // Check if we haven't received a pong in too long
+    if (_lastPongTime != null) {
+      final timeSinceLastPong = DateTime.now().difference(_lastPongTime!);
+      if (timeSinceLastPong > _maxPongStaleness) {
+        debugPrint('WS HEALTH CHECK: Connection stale (${timeSinceLastPong.inSeconds}s since last pong), forcing reconnect');
+        _missedPongs = 0;
+        _awaitingPong = false;
+        _lastPongTime = null;
+        forceReconnect();
+        return;
+      }
+    }
+
+    // Also check if channel is in bad state
+    if (_channel == null && _connectionState == WSConnectionState.authenticated) {
+      debugPrint('WS HEALTH CHECK: Channel null but state is authenticated, forcing reconnect');
+      forceReconnect();
+      return;
+    }
+
+    debugPrint('WS HEALTH CHECK: Connection healthy');
   }
 
   /// Send a ping to keep the connection alive (can be called externally for background keep-alive)
@@ -1040,10 +1144,25 @@ class WebSocketSignalingService {
       if (_awaitingPong) {
         _missedPongs++;
         debugPrint('WS: Missed pong ($_missedPongs/$_maxMissedPongs)');
+
+        // Also check timestamp-based staleness
+        if (_lastPongTime != null) {
+          final timeSinceLastPong = DateTime.now().difference(_lastPongTime!);
+          if (timeSinceLastPong > (_heartbeatInterval * 4)) {
+            debugPrint('WS: Connection stale (${timeSinceLastPong.inSeconds}s since last pong), forcing reconnect');
+            _missedPongs = 0;
+            _awaitingPong = false;
+            _lastPongTime = null;
+            _handleDone();
+            return;
+          }
+        }
+
         if (_missedPongs >= _maxMissedPongs) {
-          debugPrint('WS: Connection appears dead, forcing reconnect');
+          debugPrint('WS: Connection appears dead after $_missedPongs missed pongs, forcing reconnect');
           _missedPongs = 0;
           _awaitingPong = false;
+          _lastPongTime = null;
           _handleDone();
           return;
         }
@@ -1058,6 +1177,56 @@ class WebSocketSignalingService {
     }
   }
 
+  /// Start monitoring network connectivity changes
+  void _startConnectivityMonitoring() {
+    _connectivitySubscription?.cancel();
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(
+      (List<ConnectivityResult> results) {
+        final hadConnection = _hasNetworkConnection;
+        _hasNetworkConnection = results.isNotEmpty &&
+            !results.contains(ConnectivityResult.none);
+
+        debugPrint('WS: Network connectivity changed: $_hasNetworkConnection (was: $hadConnection)');
+
+        if (_hasNetworkConnection && !hadConnection) {
+          // Network restored - trigger immediate reconnect if disconnected
+          if (_connectionState == WSConnectionState.disconnected ||
+              _connectionState == WSConnectionState.reconnecting ||
+              _connectionState == WSConnectionState.error) {
+            debugPrint('WS: Network restored, triggering immediate reconnect');
+            _reconnectTimer?.cancel();
+            _reconnectTimer = null;
+            // Reset some attempts to give a fresh chance after network restore
+            _reconnectAttempts = (_reconnectAttempts / 2).floor();
+            _scheduleReconnect();
+          }
+        } else if (!_hasNetworkConnection && hadConnection) {
+          // Network lost - cancel pending reconnect and wait
+          debugPrint('WS: Network lost, pausing reconnection attempts');
+          _reconnectTimer?.cancel();
+          _reconnectTimer = null;
+        }
+      },
+      onError: (e) {
+        Logger.e('Connectivity monitoring error', error: e);
+      },
+    );
+  }
+
+  /// Stop monitoring network connectivity
+  void _stopConnectivityMonitoring() {
+    _connectivitySubscription?.cancel();
+    _connectivitySubscription = null;
+  }
+
+  /// Check if connection is healthy based on last pong time
+  bool get isConnectionHealthy {
+    if (_lastPongTime == null) return isConnected;
+    final timeSinceLastPong = DateTime.now().difference(_lastPongTime!);
+    // Consider unhealthy if no pong received in 3x heartbeat interval
+    return timeSinceLastPong < (_heartbeatInterval * 3);
+  }
+
   /// Force reconnect - used when app comes to foreground or notification tap
   /// Uses fast mode for quicker reconnection
   Future<void> forceReconnect() async {
@@ -1069,6 +1238,11 @@ class WebSocketSignalingService {
 
     // Reset reconnect attempts to allow fresh start
     _reconnectAttempts = 0;
+
+    // Reset pong tracking
+    _missedPongs = 0;
+    _awaitingPong = false;
+    _lastPongTime = null;
 
     // Disconnect current connection if any
     _stopHeartbeat();
@@ -1086,8 +1260,11 @@ class WebSocketSignalingService {
     _updateState(WSConnectionState.disconnected);
 
     // Reconnect if we have credentials - use fast mode for quick reconnection
-    if (_authToken != null) {
+    if (_authToken != null && _hasNetworkConnection) {
       await connect(_authToken!, displayName: _displayName, fastMode: true);
+    } else if (!_hasNetworkConnection) {
+      debugPrint('WS: No network connection, waiting for connectivity...');
+      _updateState(WSConnectionState.reconnecting);
     }
   }
 
@@ -1095,6 +1272,8 @@ class WebSocketSignalingService {
   void _stopHeartbeat() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+    _healthCheckTimer?.cancel();
+    _healthCheckTimer = null;
   }
 
   /// Send a message
@@ -1123,6 +1302,7 @@ class WebSocketSignalingService {
 
   /// Clean up resources
   Future<void> dispose() async {
+    _stopConnectivityMonitoring();
     await disconnect();
     await _connectionStateController.close();
     await _messageController.close();
