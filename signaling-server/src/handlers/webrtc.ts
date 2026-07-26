@@ -45,6 +45,10 @@ export function handleWebRTCOffer(
         ...offerMessage,
         fromUserId: userId,
       });
+    } else {
+      console.log(
+        `DROP WebRTC offer from ${userId} to ${targetUserId} in room ${roomId}: target socket not found`
+      );
     }
   } else {
     // Broadcast to all other room members
@@ -76,7 +80,7 @@ export function handleWebRTCAnswer(
   // Find target user's WebSocket
   const targetWs = roomManager.getUserSocket(roomId, targetUserId);
   if (!targetWs) {
-    console.log(`Target user ${targetUserId} not found in room ${roomId}`);
+    console.log(`DROP WebRTC answer from ${userId} to ${targetUserId} in room ${roomId}: target socket not found`);
     return;
   }
 
@@ -128,6 +132,10 @@ export function handleWebRTCIce(
         ...iceMessage,
         fromUserId: userId,
       });
+    } else {
+      console.log(
+        `DROP WebRTC ICE from ${userId} to ${targetUserId} in room ${roomId}: target socket not found`
+      );
     }
   } else {
     // Broadcast to all other room members
@@ -176,6 +184,10 @@ export function handleWebRTCIceBatch(
         ...batchMessage,
         fromUserId: userId,
       });
+    } else {
+      console.log(
+        `DROP WebRTC ICE batch (${candidates.length} candidates) from ${userId} to ${targetUserId} in room ${roomId}: target socket not found`
+      );
     }
   } else {
     // Broadcast to all other room members
