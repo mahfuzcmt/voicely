@@ -457,6 +457,8 @@ class SimplePttSessionNotifier extends StateNotifier<SimplePttSessionState>
             debugPrint('SimplePTT: Failed to get display name: $e');
           }
         }
+        _wsService.tokenProvider =
+            () async => FirebaseAuth.instance.currentUser?.getIdToken();
         final success = await _wsService.connect(token, displayName: displayName);
 
         // Update background service

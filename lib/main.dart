@@ -167,6 +167,8 @@ Future<void> _preConnectWebSocket() async {
 
     // Connect with fast mode for quick reconnection
     debugPrint('Pre-connect: Starting fast WebSocket connection...');
+    wsService.tokenProvider =
+        () async => FirebaseAuth.instance.currentUser?.getIdToken();
     await wsService.connect(token, displayName: user.displayName, fastMode: true);
     debugPrint('Pre-connect: WebSocket connection initiated');
   } catch (e) {

@@ -813,6 +813,8 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
         }
 
         debugPrint('LivePTT: FINAL displayName to send="${displayName}" (length=${displayName?.length ?? 0})');
+        _wsService.tokenProvider =
+            () async => FirebaseAuth.instance.currentUser?.getIdToken();
         await _wsService.connect(token, displayName: displayName).timeout(
           _connectionTimeout,
           onTimeout: () {
@@ -1014,6 +1016,13 @@ class LivePttSessionNotifier extends StateNotifier<LivePttSessionState>
   Future<void> _backgroundReconnect() async {
     if (_wsService.isConnected) {
       debugPrint('LivePTT: Background reconnect skipped - already connected');
+      return;
+    }
+
+    // Another connection for this account took over (close code 4004) -
+    // reconnecting from the background would start an endless kick war.
+    if (_wsService.sessionReplaced) {
+      debugPrint('LivePTT: Background reconnect skipped - session replaced by another connection');
       return;
     }
 

@@ -85,6 +85,36 @@ export class RoomManager {
   }
 
   /**
+   * Move all room memberships from an old socket to a new socket for the
+   * same user, without leave/join broadcasts. Used when a reconnecting
+   * client replaces its prior socket — the user never actually left, so
+   * other members must not tear down their peer connections.
+   */
+  transferMembership(
+    oldWs: AuthenticatedWebSocket,
+    newWs: AuthenticatedWebSocket
+  ): string[] {
+    const userId = newWs.userId;
+    const transferred: string[] = [];
+    if (!userId || !oldWs.rooms) return transferred;
+
+    for (const roomId of Array.from(oldWs.rooms)) {
+      const room = this.rooms.get(roomId);
+      if (room && room.members.get(userId) === oldWs) {
+        room.members.set(userId, newWs);
+        if (!newWs.rooms) {
+          newWs.rooms = new Set();
+        }
+        newWs.rooms.add(roomId);
+        transferred.push(roomId);
+      }
+      oldWs.rooms.delete(roomId);
+    }
+
+    return transferred;
+  }
+
+  /**
    * Remove user from all rooms
    */
   removeUserFromAllRooms(userId: string): string[] {

@@ -15,13 +15,16 @@ const skipAuth = process.env.SKIP_AUTH === 'true';
 export const userSockets: Map<string, AuthenticatedWebSocket> = new Map();
 
 /**
- * Optional hook the server installs so the auth handler can fully clean up
- * a replaced socket (remove it from rooms, release the floor, etc.) before
- * closing it.
+ * Optional hook the server installs so room/floor state can be handed over
+ * from a replaced socket to the new socket before the old one is closed.
+ * Receives (oldWs, newWs).
  */
-type DisconnectHandler = (ws: AuthenticatedWebSocket) => void;
-let onReplacedSocket: DisconnectHandler | null = null;
-export function setReplacedSocketHandler(handler: DisconnectHandler): void {
+type ReplacedSocketHandler = (
+  oldWs: AuthenticatedWebSocket,
+  newWs: AuthenticatedWebSocket
+) => void;
+let onReplacedSocket: ReplacedSocketHandler | null = null;
+export function setReplacedSocketHandler(handler: ReplacedSocketHandler): void {
   onReplacedSocket = handler;
 }
 
@@ -145,14 +148,9 @@ export async function verifyToken(token: string): Promise<AuthResult> {
   } catch (error) {
     console.error(`Token verification failed after ${Date.now() - startTime}ms:`, error);
 
-    // FALLBACK: Decode token without verification for expired tokens
-    console.log('Falling back to token decode without verification...');
-    const decoded = decodeTokenWithoutVerification(token);
-    if (decoded) {
-      console.log(`Fallback decode succeeded: userId=${decoded.userId}, displayName="${decoded.displayName}"`);
-      return decoded;
-    }
-
+    // No unverified-decode fallback here: accepting expired/unverified tokens
+    // would let anyone authenticate as any user. Clients must send a fresh
+    // token (Firebase ID tokens expire after 1 hour) and retry on failure.
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Token verification failed',
@@ -178,15 +176,15 @@ export async function handleAuth(
     ws.rooms = new Set();
 
     // Enforce single live socket per user. If a prior socket exists for this
-    // userId, fully clean it up (rooms, floor) and close it. This eliminates
-    // the "zombie second connection still in room" pattern.
+    // userId, hand its room membership over to the new socket (no member_left
+    // broadcast — the user never actually left) and close the old one.
     const existing = userSockets.get(result.userId!);
     if (existing && existing !== ws) {
       console.log(`Replacing prior socket for ${result.userId}`);
       try {
-        if (onReplacedSocket) onReplacedSocket(existing);
+        if (onReplacedSocket) onReplacedSocket(existing, ws);
       } catch (e) {
-        console.error('Replaced-socket cleanup error:', e);
+        console.error('Replaced-socket handover error:', e);
       }
       try {
         existing.close(4004, 'Replaced by new connection');

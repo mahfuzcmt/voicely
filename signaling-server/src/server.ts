@@ -29,10 +29,18 @@ const MESSAGE_RATE_WINDOW = 1000; // 1 second window
 const roomManager = new RoomManager();
 const floorController = new FloorController(roomManager);
 
-// When a user authenticates a second time, fully clean up the prior socket
-// (rooms, floor) before it is force-closed by the auth handler.
-setReplacedSocketHandler((priorWs) => {
-  handleDisconnect(roomManager, floorController, priorWs);
+// When a user authenticates a second time, silently hand the prior socket's
+// room membership over to the new socket before the old one is force-closed.
+// No member_left broadcast is sent — the user never actually left, so other
+// members keep their peer connections instead of tearing down audio on every
+// reconnect (this churn was the main cause of call drops).
+setReplacedSocketHandler((priorWs, newWs) => {
+  const moved = roomManager.transferMembership(priorWs, newWs);
+  if (moved.length > 0) {
+    console.log(
+      `Handed over ${moved.length} room(s) [${moved.join(', ')}] from prior socket of ${newWs.userId}`
+    );
+  }
 });
 
 // Express app

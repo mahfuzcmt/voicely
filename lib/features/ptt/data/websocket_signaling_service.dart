@@ -274,6 +274,20 @@ class WebSocketSignalingService {
   String? _userId;
   String? _displayName;
 
+  /// Optional callback that returns a fresh Firebase ID token. Automatic
+  /// reconnect paths use this so we never retry with an expired token
+  /// (Firebase ID tokens expire after 1 hour; the server rejects them).
+  Future<String?> Function()? tokenProvider;
+
+  /// Server close code meaning another connection for this account took over.
+  static const int _closeCodeReplaced = 4004;
+
+  /// True after the server closed us with 4004. Suppresses ALL automatic
+  /// reconnection (timer, health check, background service) — otherwise two
+  /// devices on the same account kick each other in an endless loop, dropping
+  /// the call for the whole room each cycle. Cleared by an explicit connect().
+  bool _sessionReplaced = false;
+
   int _reconnectAttempts = 0;
   /// Increased from 5 to 100 for production reliability with 1000+ users
   static const int _maxReconnectAttempts = 100;
@@ -337,6 +351,7 @@ class WebSocketSignalingService {
   // Getters
   WSConnectionState get currentConnectionState => _connectionState;
   bool get isConnected => _connectionState == WSConnectionState.authenticated;
+  bool get sessionReplaced => _sessionReplaced;
   String? get userId => _userId;
   Set<String> get joinedRooms => Set.unmodifiable(_joinedRooms);
 
@@ -357,6 +372,9 @@ class WebSocketSignalingService {
   /// Set [fastMode] to true for faster timeouts (e.g., notification tap, foreground resume)
   Future<bool> connect(String authToken, {String? displayName, bool fastMode = false}) async {
     debugPrint('WS: connect() called with displayName: $displayName, fastMode: $fastMode');
+
+    // An explicit connect() is a deliberate takeover — clear the replaced flag
+    _sessionReplaced = false;
 
     // Prevent concurrent connection attempts
     if (_isConnecting) {
@@ -1040,8 +1058,20 @@ class WebSocketSignalingService {
 
   /// Handle WebSocket close
   void _handleDone() {
-    Logger.d('WebSocket connection closed');
+    final closeCode = _channel?.closeCode;
+    Logger.d('WebSocket connection closed (code: $closeCode)');
     _stopHeartbeat();
+
+    // The server closed us because another connection for this account took
+    // over. Reconnecting would kick that connection and start an endless
+    // kick war between the two sessions, so stay disconnected until the user
+    // explicitly reconnects (app resume, notification tap, reconnect button).
+    if (closeCode == _closeCodeReplaced) {
+      _sessionReplaced = true;
+      Logger.w('WS: Session replaced by another connection (4004) - automatic reconnect disabled');
+      _updateState(WSConnectionState.disconnected);
+      return;
+    }
 
     if (_connectionState != WSConnectionState.disconnected) {
       _updateState(WSConnectionState.disconnected);
@@ -1053,6 +1083,10 @@ class WebSocketSignalingService {
   void _scheduleReconnect() {
     if (_reconnectTimer != null) return;
     if (_authToken == null) return;
+    if (_sessionReplaced) {
+      Logger.d('WS: Reconnect suppressed - session was replaced by another connection');
+      return;
+    }
 
     // Check network connectivity before attempting reconnect
     if (!_hasNetworkConnection) {
@@ -1089,12 +1123,28 @@ class WebSocketSignalingService {
     Logger.d('Scheduling reconnect in ${delay.inMilliseconds}ms (attempt $_reconnectAttempts/$_maxReconnectAttempts, jitter: ${jitterMs}ms)');
     _updateState(WSConnectionState.reconnecting);
 
-    _reconnectTimer = Timer(delay, () {
+    _reconnectTimer = Timer(delay, () async {
       _reconnectTimer = null;
-      if (_authToken != null && _hasNetworkConnection) {
-        connect(_authToken!, displayName: _displayName);
-      } else if (!_hasNetworkConnection) {
+      if (!_hasNetworkConnection) {
         debugPrint('WS: Network lost during reconnect delay, waiting...');
+        return;
+      }
+      if (_sessionReplaced) return;
+
+      // Fetch a fresh token if a provider is available - the stored token
+      // may have expired (Firebase ID tokens are only valid for 1 hour)
+      var token = _authToken;
+      final provider = tokenProvider;
+      if (provider != null) {
+        try {
+          token = await provider() ?? token;
+        } catch (e) {
+          debugPrint('WS: tokenProvider failed, falling back to stored token: $e');
+        }
+      }
+
+      if (token != null) {
+        connect(token, displayName: _displayName);
       }
     });
   }
@@ -1238,6 +1288,14 @@ class WebSocketSignalingService {
   Future<void> forceReconnect() async {
     debugPrint('WS: Force reconnect requested (fast mode)');
 
+    // Never auto-reconnect a session that was replaced by another connection
+    // (close code 4004) - it would kick the other session and loop forever.
+    // Only an explicit connect() with a token clears this state.
+    if (_sessionReplaced) {
+      debugPrint('WS: Force reconnect suppressed - session was replaced by another connection');
+      return;
+    }
+
     // Cancel any pending reconnect timer
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
@@ -1267,7 +1325,17 @@ class WebSocketSignalingService {
 
     // Reconnect if we have credentials - use fast mode for quick reconnection
     if (_authToken != null && _hasNetworkConnection) {
-      await connect(_authToken!, displayName: _displayName, fastMode: true);
+      // Prefer a fresh token - the stored one may be expired (1 hour TTL)
+      var token = _authToken!;
+      final provider = tokenProvider;
+      if (provider != null) {
+        try {
+          token = await provider() ?? token;
+        } catch (e) {
+          debugPrint('WS: tokenProvider failed, falling back to stored token: $e');
+        }
+      }
+      await connect(token, displayName: _displayName, fastMode: true);
     } else if (!_hasNetworkConnection) {
       debugPrint('WS: No network connection, waiting for connectivity...');
       _updateState(WSConnectionState.reconnecting);
